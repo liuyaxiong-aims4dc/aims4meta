@@ -58,6 +58,10 @@ cfmid_output/
 project_tof.sirius
 .verysync/
 
+# Claude & Qoder AI config
+.claude/
+.qoder/
+
 # OS
 .DS_Store
 Thumbs.db
