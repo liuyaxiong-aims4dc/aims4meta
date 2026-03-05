@@ -1,0 +1,126 @@
+#!/usr/bin/env sh
+
+##############################################################################
+#  This file is part of the SIRIUS Software for analyzing MS and MS/MS data
+#
+#  Copyright (C) 2013-2023 Chair of Bioinformatics, Friedrich-Schiller University.
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Affero General Public License
+#  as published by the Free Software Foundation; either
+#  version 3 of the License, or (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  Lesser General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License along with SIRIUS.
+#  If not, see <https://www.gnu.org/licenses/agpl-3.0.txt>
+##############################################################################
+
+# Attempt to set APP_HOME
+# Resolve links: $0 may be a link
+PRG="$0"
+# Need this for relative symlinks.
+while [ -h "$PRG" ] ; do
+    ls=`ls -ld "$PRG"`
+    link=`expr "$ls" : '.*-> \(.*\)$'`
+    if expr "$link" : '/.*' > /dev/null; then
+        PRG="$link"
+    else
+        PRG=`dirname "$PRG"`"/$link"
+    fi
+done
+SAVED="`pwd`"
+cd "`dirname \"$PRG\"`/.." >/dev/null
+APP_HOME="`pwd -P`"
+cd "$SAVED" >/dev/null
+
+#configure java library path
+JAVA_LIBRARY_PATH=""
+if [ -n "$LD_RUN_PATH" ]; then
+  if [ -n "$JAVA_LIBRARY_PATH" ]; then
+    JAVA_LIBRARY_PATH="$JAVA_LIBRARY_PATH:$LD_RUN_PATH"
+  else
+    JAVA_LIBRARY_PATH="$LD_RUN_PATH"
+  fi
+fi
+
+if [ -n "$CONDA_PREFIX" ]; then
+  if [ -n "$JAVA_LIBRARY_PATH" ]; then
+    JAVA_LIBRARY_PATH="$JAVA_LIBRARY_PATH:$CONDA_PREFIX/lib"
+  else
+    JAVA_LIBRARY_PATH="$CONDA_PREFIX/lib"
+  fi
+fi
+
+if [ -n "$GUROBI_HOME" ]; then
+  if [ -n "$JAVA_LIBRARY_PATH" ]; then
+    JAVA_LIBRARY_PATH="$JAVA_LIBRARY_PATH:$GUROBI_HOME/lib"
+  else
+    JAVA_LIBRARY_PATH="$GUROBI_HOME/lib"
+  fi
+fi
+
+if [ -n "$CPLEX_HOME" ]; then
+  if [ -n "$JAVA_LIBRARY_PATH" ]; then
+    JAVA_LIBRARY_PATH="$JAVA_LIBRARY_PATH:$CPLEX_HOME/bin/x86-64_linux"
+  else
+    JAVA_LIBRARY_PATH="$CPLEX_HOME/bin/x86-64_linux"
+  fi
+fi
+
+# Add default JVM options here. You can also use JAVA_OPTS and SIRIUS_OPTS to pass JVM options to this script.
+DEFAULT_JVM_OPTS="-Xms2G -XX:MaxRAMPercentage=60 -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError --add-opens=java.desktop/java.awt=ALL-UNNAMED"
+if [ -n "$JAVA_LIBRARY_PATH" ]; then
+  if [ -n "$DEFAULT_JVM_OPTS" ]; then
+    DEFAULT_JVM_OPTS="$DEFAULT_JVM_OPTS -Djava.library.path=$JAVA_LIBRARY_PATH"
+  else
+    DEFAULT_JVM_OPTS="-Djava.library.path=$JAVA_LIBRARY_PATH"
+  fi
+fi
+
+# Native library path
+#export #libraryPathKey#="#libraryPathVal#"
+
+# Add location of jar files for Classpath
+JAR_HOME="$APP_HOME/lib/app"
+
+# Add full lib dir to classpath
+CLASSPATH="\"$JAR_HOME/*\":\"$GUROBI_HOME/lib/gurobi.jar\":\"$CPLEX_HOME/lib/cplex.jar\""
+
+# Determine the Java command to use to start the JVM.
+JAVACMD="$APP_HOME/lib/runtime/bin/java"
+
+# fallback to java in path
+if [ ! -f "$JAVACMD" ]; then
+  JAVACMD="java"
+fi
+
+## Check the session type ->  enalble if native wayland in jbr is more stable
+#if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+#  # Check if it's a JetBrains Runtime by searching for "JBR" in the version string
+#  IS_JBR=$("$JAVACMD" -version 2>&1 | grep "JBR")
+#  # If it's a Wayland session, ALSO check if it's a JBR
+#  if [ -n "$IS_JBR" ]; then
+#    echo "INFO: Wayland session and JBR detected. Enabling native Wayland rendering."
+#    DEFAULT_JVM_OPTS="$DEFAULT_JVM_OPTS -Dawt.toolkit.name=WLToolkit"
+#  else
+#    echo "WARNING: Wayland session detected, but the Java runtime is not a JBR. Using default X11 toolkit."
+#  fi
+#fi
+
+# Main class to run the app
+MAIN_CLASS="org.springframework.boot.loader.launch.JarLauncher"
+
+# Escape application args
+save() {
+  for i; do printf %s\\n "$i" | sed "s/'/'\\\\''/g;1s/^/'/;\$s/\$/' \\\\/"; done
+  echo " "
+}
+APP_ARGS=$(save "$@")
+
+# Collect all arguments for the java command, following the shell quoting and substitution rules
+eval set -- "$DEFAULT_JVM_OPTS" "$JAVA_OPTS" "$SIRIUS_OPTS" -classpath "$CLASSPATH" "$MAIN_CLASS" "$APP_ARGS"
+exec "$JAVACMD" "$@"

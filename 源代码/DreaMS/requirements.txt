@@ -1,0 +1,2 @@
+# 固定setuptools版本，避免pkg_resources被移除
+setuptools<81

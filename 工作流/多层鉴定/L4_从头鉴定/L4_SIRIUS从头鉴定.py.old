@@ -1,0 +1,1308 @@
+#!/usr/bin/env python3
+"""
+L4: SIRIUS 从头鉴定
+
+工作流程：
+1. 预处理MSP（Charge→Precursor_type转换，过滤多电荷离子）
+2. SIRIUS登录验证
+3. 四步分析：Formulas → Structures → Classes → Spectra-Search
+
+输入：L4a: L3类似物命中的样品MSP / L4b: 前三层完全未涉及的未知物MSP
+输出：SIRIUS项目文件 + L4_summary.txt
+
+基于 SIRIUS_从头鉴定/sirius_analysis_optimized.py 改造
+"""
+
+###############################################################################
+# 配置参数区（全部由总控脚本注入，无默认值）
+###############################################################################
+
+import os
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+
+# 输入: MSP 文件路径
+SAMPLE_MSP = os.environ.get('L4_SAMPLE_MSP')
+
+# 输出目录
+OUTPUT_DIR = os.environ.get('L4_OUTPUT_DIR', "")
+
+# 仪器类型: 'orbi' (Orbitrap, 5ppm) 或 'tof' (Q-TOF, 10ppm)
+INSTRUMENT_TYPE = os.environ.get('L4_INSTRUMENT_TYPE')
+
+# m/z 阈值
+MZ_THRESHOLD = os.environ.get('L4_MZ_THRESHOLD')
+
+# 数据库选择
+DATABASE_CHOICE = os.environ.get('L4_DATABASE_CHOICE')
+
+# 扩展搜索
+EXPANSIVE_SEARCH = os.environ.get('L4_EXPANSIVE_SEARCH')
+
+# SIRIUS路径
+SIRIUS_BIN = os.environ.get('L4_SIRIUS_BIN')
+
+# 并行与资源配置
+SIRIUS_CORES = os.environ.get('L4_SIRIUS_CORES')
+SIRIUS_BUFFER = os.environ.get('L4_SIRIUS_BUFFER')
+
+# Formulas 分析参数
+FORMULA_CANDIDATES = os.environ.get('L4_FORMULA_CANDIDATES')
+FORMULA_CANDIDATES_PER_ION = os.environ.get('L4_FORMULA_CANDIDATES_PER_ION')
+DETECTABLE_ELEMENTS = os.environ.get('L4_DETECTABLE_ELEMENTS')
+ENFORCED_ELEMENTS = os.environ.get('L4_ENFORCED_ELEMENTS')
+FIX_LIPIDS = os.environ.get('L4_FIX_LIPIDS')
+
+# 预处理的同位素映射JSON文件（由总控脚本调用辅助模块生成）
+ISOTOPE_MAP = os.environ.get('L4_ISOTOPE_MAP', '')
+
+# 验证必需参数
+_missing = []
+if not SAMPLE_MSP:
+    _missing.append('L4_SAMPLE_MSP')
+if not INSTRUMENT_TYPE:
+    _missing.append('L4_INSTRUMENT_TYPE')
+if not MZ_THRESHOLD:
+    _missing.append('L4_MZ_THRESHOLD')
+if not DATABASE_CHOICE:
+    _missing.append('L4_DATABASE_CHOICE')
+if not EXPANSIVE_SEARCH:
+    _missing.append('L4_EXPANSIVE_SEARCH')
+if not SIRIUS_BIN:
+    _missing.append('L4_SIRIUS_BIN')
+if not SIRIUS_CORES:
+    _missing.append('L4_SIRIUS_CORES')
+if not FORMULA_CANDIDATES:
+    _missing.append('L4_FORMULA_CANDIDATES')
+
+if _missing:
+    raise ValueError(f"错误：以下环境变量未设置，必须由总控脚本提供：{', '.join(_missing)}")
+
+# 类型转换
+MZ_THRESHOLD = int(MZ_THRESHOLD)
+SIRIUS_CORES = int(SIRIUS_CORES)
+SIRIUS_BUFFER = int(SIRIUS_BUFFER) if SIRIUS_BUFFER else 0
+FORMULA_CANDIDATES = int(FORMULA_CANDIDATES)
+FORMULA_CANDIDATES_PER_ION = int(FORMULA_CANDIDATES_PER_ION) if FORMULA_CANDIDATES_PER_ION else 1
+
+# SIRIUS 登录脚本
+SIRIUS_LOGIN_SCRIPT = os.path.join(SCRIPT_DIR, "login_sirius.sh")
+HEURISTIC_THRESHOLD = 300
+HEURISTIC_ONLY_THRESHOLD = 650
+COMPOUND_TIMEOUT = 600      # 10分钟/化合物
+TREE_TIMEOUT = 100          # 单棵树最多100秒（0=无限制，但大分子会卡住）
+
+###############################################################################
+
+import subprocess
+import os
+import sys
+import re
+import argparse
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+# 复用辅助功能模块：仅用于 extract_compound_id 提取 compound_id
+_UTILS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "辅助功能")
+sys.path.insert(0, os.path.join(_UTILS_DIR, "原始数据CSV关联"))
+
+from 原始数据CSV关联 import extract_compound_id
+
+# 加合物质量修正表（用于m/z归一化）
+ADDUCT_MASS = {
+    # 正模式
+    '[M+H]+': 1.007276,
+    '[M+Na]+': 22.989218,
+    '[M+K]+': 38.963158,
+    '[M+NH4]+': 18.033823,
+    '[M+H-H2O]+': -17.00274,
+    # 负模式
+    '[M-H]-': -1.007276,
+    '[M+Cl]-': 34.969402,
+    '[M+FA-H]-': 44.998201,
+    '[M+HAc-H]-': 59.013851,
+}
+
+
+def load_cluster_info(sample_msp):
+    """
+    加载L1预处理生成的簇信息
+    返回: {precursor_mz: cluster_id} 字典
+    """
+    sample_path = Path(sample_msp)
+    l1_dir = sample_path.parent / 'three_layer_results' / 'L1_results'
+    
+    if not l1_dir.exists():
+        l1_dir = sample_path.parent.parent / 'three_layer_results' / 'L1_results'
+    if not l1_dir.exists():
+        return {}
+    
+    cluster_file = l1_dir / 'cluster_assignments.csv'
+    if not cluster_file.exists():
+        return {}
+    
+    cluster_map = {}
+    try:
+        df = pd.read_csv(cluster_file)
+        for _, row in df.iterrows():
+            mz = row.get('precursor_mz')
+            cluster_id = row.get('cluster_id')
+            if mz is not None and cluster_id is not None:
+                cluster_map[round(mz, 4)] = cluster_id
+    except Exception:
+        pass
+    
+    return cluster_map
+
+
+def match_cluster_id(query_mz, cluster_map, tolerance=0.01):
+    """根据precursor_mz匹配簇ID"""
+    if not cluster_map:
+        return -1
+    
+    try:
+        mz = float(query_mz)
+    except:
+        return -1
+    
+    mz_rounded = round(mz, 4)
+    # 精确匹配
+    if mz_rounded in cluster_map:
+        return cluster_map[mz_rounded]
+    
+    # 容差匹配
+    for mz_key in cluster_map:
+        if abs(mz_key - mz_rounded) <= tolerance:
+            return cluster_map[mz_key]
+    
+    return -1  # 无匹配
+
+
+def add_cluster_to_csv(csv_file, cluster_map):
+    """为CSV文件添加簇ID列"""
+    if not cluster_map or not Path(csv_file).exists():
+        return
+    
+    try:
+        df = pd.read_csv(csv_file)
+        mz_col = None
+        for col in ['precursor m/z', 'mz', 'mass', 'query_mz']:
+            if col in df.columns:
+                mz_col = col
+                break
+        
+        if mz_col:
+            df['cluster_id'] = df[mz_col].apply(lambda mz: match_cluster_id(mz, cluster_map))
+            df.to_csv(csv_file, index=False, encoding='utf-8')
+    except Exception:
+        pass
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='L4: SIRIUS从头鉴定')
+    parser.add_argument('--sample_msp', default=SAMPLE_MSP,
+                        help='输入MSP文件（L4a: L3类似物 / L4b: 未知物）')
+    parser.add_argument('--output_dir', default=OUTPUT_DIR,
+                        help='输出目录（留空自动推断）')
+    parser.add_argument('--ion_mode', default='POS', choices=['POS', 'NEG'],
+                        help='离子模式 (POS/NEG)')
+    parser.add_argument('--instrument', default=INSTRUMENT_TYPE,
+                        choices=['orbi', 'tof'],
+                        help='仪器类型')
+    parser.add_argument('--mz_threshold', type=float, default=MZ_THRESHOLD,
+                        help='m/z上限')
+    parser.add_argument('--database', default=DATABASE_CHOICE,
+                        help='数据库选择')
+    return parser.parse_args()
+
+
+# ============================================================
+# MSP 预处理
+# ============================================================
+
+def preprocess_msp(input_file, output_file, mz_threshold, ion_mode='POS'):
+    """
+    预处理MSP文件：
+    - 保留原始加合物类型（SIRIUS 原生支持 [M+H]+, [M+Na]+, [M+K]+ 等）
+    - 无加合物的样品添加默认 [M+H]+ / [M-H]-（正常不会出现此情况）
+    - 过滤多电荷离子
+    - 过滤 m/z > 阈值的化合物
+    """
+    default_adduct = "[M+H]+" if ion_mode == 'POS' else "[M-H]-"
+
+    compounds_total = 0
+    compounds_kept = 0
+    compounds_adduct_added = 0
+    compounds_skipped_mz = 0
+    compounds_skipped_charge = 0
+    adduct_stats = {}
+
+    with open(input_file, 'r', encoding='utf-8', errors='ignore') as infile, \
+         open(output_file, 'w', encoding='utf-8') as outfile:
+
+        current_lines = []
+        precursor_type_value = None
+        precursor_type_idx = -1
+        charge_line_idx = -1
+        charge_value = None
+        precursor_mz = None
+        precursor_mz_idx = -1
+
+        def process_compound():
+            nonlocal compounds_total, compounds_kept
+            nonlocal compounds_adduct_added
+            nonlocal compounds_skipped_mz, compounds_skipped_charge
+
+            compounds_total += 1
+
+            if precursor_mz is not None and precursor_mz >= mz_threshold:
+                compounds_skipped_mz += 1
+                return
+
+            if precursor_mz is None:
+                compounds_skipped_mz += 1
+                return
+
+            if charge_value in ["2+", "3+", "4+", "5+", "6+", "7+"]:
+                compounds_skipped_charge += 1
+                return
+
+            final_adduct = precursor_type_value
+            if precursor_type_idx < 0:
+                if charge_line_idx >= 0:
+                    current_lines[charge_line_idx] = f"Precursor_type: {default_adduct}"
+                    final_adduct = default_adduct
+                    compounds_adduct_added += 1
+                else:
+                    insert_idx = precursor_mz_idx + 1 if precursor_mz_idx >= 0 else len(current_lines)
+                    current_lines.insert(insert_idx, f"Precursor_type: {default_adduct}")
+                    final_adduct = default_adduct
+                    compounds_adduct_added += 1
+
+            if final_adduct:
+                adduct_stats[final_adduct] = adduct_stats.get(final_adduct, 0) + 1
+
+            for line in current_lines:
+                outfile.write(line + "\n")
+
+            compounds_kept += 1
+
+        for line in infile:
+            stripped = line.rstrip()
+
+            if not stripped:
+                if current_lines:
+                    current_lines.append("")
+                    process_compound()
+                current_lines = []
+                precursor_type_value = None
+                precursor_type_idx = -1
+                charge_line_idx = -1
+                charge_value = None
+                precursor_mz = None
+                precursor_mz_idx = -1
+                continue
+
+            current_lines.append(stripped)
+
+            upper = stripped.upper()
+            if upper.startswith('PRECURSORTYPE:') or upper.startswith('ADDUCT:') or upper.startswith('PRECURSOR_TYPE:'):
+                precursor_type_idx = len(current_lines) - 1
+                parts = stripped.split(':', 1)
+                if len(parts) > 1:
+                    precursor_type_value = parts[1].strip()
+
+            charge_match = re.search(r'^Charge\s*:\s*([0-9]+)([-+])',
+                                     stripped, re.IGNORECASE)
+            if charge_match:
+                charge_line_idx = len(current_lines) - 1
+                charge_value = f"{charge_match.group(1)}{charge_match.group(2)}"
+
+            mz_match = re.search(r'^PrecursorMZ\s*:\s*([0-9.]+)',
+                                 stripped, re.IGNORECASE)
+            if mz_match:
+                precursor_mz_idx = len(current_lines) - 1
+                try:
+                    precursor_mz = float(mz_match.group(1))
+                except ValueError:
+                    pass
+
+        if current_lines:
+            process_compound()
+
+    print(f"  预处理: {compounds_total} → {compounds_kept} 条 (m/z过滤: {compounds_skipped_mz}, 多电荷过滤: {compounds_skipped_charge})")
+
+    return output_file, compounds_kept
+
+
+# ============================================================
+# MS1 同位素模式注入（从原始 CSV 关联）
+# ============================================================
+
+# 13C-12C 质量差，用于计算同位素峰 m/z 间距
+ISOTOPE_MASS_DIFF = 1.003355
+
+
+def load_isotope_from_json(isotope_json):
+    """
+    从预处理的 JSON 文件加载同位素分布映射
+    
+    JSON 文件由总控脚本调用 辅助功能/同位素相似度计算/同位素相似度计算.py 生成
+    格式: {compound_id: isotope_dist_str}
+         compound_id 如 "10.10_380.1323m/z"
+         isotope_dist_str 如 "100 - 89.5 - 63"
+    
+    返回: {compound_id: [abundance_list]} 映射
+         abundance_list 如 [100.0, 89.5, 63.0]
+    """
+    if not isotope_json or not os.path.exists(isotope_json):
+        print(f"  同位素映射: 文件不存在 ({isotope_json})")
+        return {}
+    
+    isotope_map = {}
+    try:
+        import json
+        with open(isotope_json, 'r', encoding='utf-8') as f:
+            raw_map = json.load(f)
+        
+        # 解析同位素分布字符串为丰度列表
+        for cid, iso_str in raw_map.items():
+            if not iso_str:
+                continue
+            # 解析 "100 - 89.5 - 63" 格式
+            try:
+                parts = [float(x.strip()) for x in iso_str.replace('−', '-').split('-') if x.strip()]
+                if parts:
+                    isotope_map[cid] = parts
+            except ValueError:
+                continue
+        
+        print(f"  同位素映射: 加载 {len(isotope_map)} 条有效分布")
+    except Exception as e:
+        print(f"  同位素映射: 加载失败 ({e})")
+    
+    return isotope_map
+
+
+def find_isotope_abundances(compound_id, isotope_map):
+    """
+    弹性匹配 compound_id 到同位素映射
+    
+    MSDIAL CSV的Compound列和MSP的NAME/COMMENT字段可能使用不同后缀格式：
+    - CSV: "4.63_678.4991n" (n=负模式, p=正模式)
+    - MSP: "10.10_380.1323m/z" (m/z后缀)
+    - MSP: "10.10_380.1323" (无后缀)
+    
+    匹配策略（按优先级）：
+    1. 精确匹配
+    2. 去掉 compound_id 的 "m/z" 后缀后尝试 n/p/无后缀
+    3. 仅用 RT_mz 核心部分模糊匹配
+    """
+    if not compound_id or not isotope_map:
+        return []
+    
+    # 策略1: 精确匹配
+    if compound_id in isotope_map:
+        return isotope_map[compound_id]
+    
+    # 提取 RT 和 m/z 核心数值
+    # 支持格式: "10.10_380.1323m/z", "4.63_678.4991n", "10.10_380.1323"
+    match = re.match(r'([\d.]+)_([\d.]+)', compound_id)
+    if not match:
+        return []
+    
+    rt, mz = match.groups()
+    base_key = f"{rt}_{mz}"
+    
+    # 策略2: 尝试多种后缀变体
+    for suffix in ['', 'n', 'p', 'm/z']:
+        test_key = f"{base_key}{suffix}"
+        if test_key in isotope_map:
+            return isotope_map[test_key]
+    
+    # 策略3: mz容差匹配（±0.001 Da，覆盖四舍五入差异）
+    try:
+        target_rt = float(rt)
+        target_mz = float(mz)
+        for key, abundances in isotope_map.items():
+            key_match = re.match(r'([\d.]+)_([\d.]+)', key)
+            if key_match:
+                key_rt = float(key_match.group(1))
+                key_mz = float(key_match.group(2))
+                if abs(key_rt - target_rt) < 0.01 and abs(key_mz - target_mz) < 0.001:
+                    return abundances
+    except (ValueError, TypeError):
+        pass
+    
+    return []
+
+
+def generate_ms1_peaks(precursor_mz, isotope_abundances, base_intensity=10000.0):
+    """
+    根据前体离子 m/z 和同位素相对丰度，生成 MS1 峰列表
+    
+    SIRIUS .ms 格式的 >ms1 段需要 m/z intensity 对
+    同位素峰间距为 ISOTOPE_MASS_DIFF (1.003355 Da，13C-12C 质量差)
+    
+    输入: precursor_mz=315.085, isotope_abundances=[100, 15.9, 0.706]
+    输出: [(315.085, 10000.0), (316.088, 1590.0), (317.092, 70.6)]
+    """
+    if not isotope_abundances or precursor_mz <= 0:
+        return []
+    
+    peaks = []
+    for i, rel_abundance in enumerate(isotope_abundances):
+        mz = precursor_mz + i * ISOTOPE_MASS_DIFF
+        intensity = rel_abundance / 100.0 * base_intensity
+        peaks.append((mz, intensity))
+    
+    return peaks
+
+
+def convert_msp_to_ms_with_ms1(processed_msp, isotope_json, output_ms):
+    """
+    将预处理后的 MSP 转为 SIRIUS .ms 格式，并注入预处理的 MS1 同位素模式
+    
+    SIRIUS .ms 格式:
+        >compound <name>
+        >parentmass <precursor_mz>
+        >ionization <adduct>
+        
+        >ms1
+        315.085 10000
+        316.088 1590
+        317.092 70.6
+        
+        >ms2
+        78.042 6133
+        226.064 1265
+        ...
+    
+    返回: (output_ms_path, n_with_ms1, n_total)
+    """
+    # 加载预处理的同位素映射
+    isotope_map = load_isotope_from_json(isotope_json)
+    
+    n_total = 0
+    n_with_ms1 = 0
+    
+    with open(processed_msp, 'r', encoding='utf-8') as infile, \
+         open(output_ms, 'w', encoding='utf-8') as outfile:
+        
+        current_name = ''
+        current_mz = 0.0
+        current_adduct = ''
+        current_comment = ''
+        current_peaks = []
+        in_peaks = False
+        
+        def write_compound():
+            nonlocal n_total, n_with_ms1
+            if not current_name:
+                return
+            
+            n_total += 1
+            
+            # 写入化合物信息
+            outfile.write(f">compound {current_name}\n")
+            outfile.write(f">parentmass {current_mz}\n")
+            outfile.write(f">ionization {current_adduct}\n")
+            outfile.write("\n")
+            
+            # 尝试注入 MS1 同位素峰
+            # 1. 优先从 NAME 括号中提取 compound_id（如 "Unknown (10.10_380.1323m/z)" → "10.10_380.1323m/z"）
+            compound_id = extract_compound_id(current_name, r'\(([^)]+)\)')
+            # 2. 也尝试用 COMMENT 字段
+            if not compound_id:
+                compound_id = current_comment
+            
+            # 使用弹性匹配（支持 m/z / n / p 等不同后缀格式）
+            abundances = find_isotope_abundances(compound_id, isotope_map)
+            if abundances:
+                ms1_peaks = generate_ms1_peaks(current_mz, abundances)
+                if ms1_peaks:
+                    outfile.write(">ms1\n")
+                    for mz, intensity in ms1_peaks:
+                        outfile.write(f"{mz:.6f} {intensity:.1f}\n")
+                    outfile.write("\n")
+                    n_with_ms1 += 1
+            
+            # 写入 MS2 谱图
+            if current_peaks:
+                outfile.write(">ms2\n")
+                for mz, intensity in current_peaks:
+                    outfile.write(f"{mz} {intensity}\n")
+                outfile.write("\n")
+        
+        for line in infile:
+            stripped = line.rstrip()
+            
+            if not stripped:
+                if current_name:
+                    write_compound()
+                # 重置
+                current_name = ''
+                current_mz = 0.0
+                current_adduct = ''
+                current_comment = ''
+                current_peaks = []
+                in_peaks = False
+                continue
+            
+            upper = stripped.upper()
+            
+            if upper.startswith('NAME:'):
+                current_name = stripped.split(':', 1)[1].strip()
+                in_peaks = False
+                continue
+            
+            mz_match = re.match(r'^PRECURSORMZ\s*:\s*([0-9.]+)', stripped, re.IGNORECASE)
+            if mz_match:
+                try:
+                    current_mz = float(mz_match.group(1))
+                except ValueError:
+                    pass
+                in_peaks = False
+                continue
+            
+            if re.match(r'^PRECURSOR_?TYPE\s*:', stripped, re.IGNORECASE):
+                current_adduct = stripped.split(':', 1)[1].strip()
+                in_peaks = False
+                continue
+            
+            if upper.startswith('COMMENT:'):
+                current_comment = stripped.split(':', 1)[1].strip()
+                in_peaks = False
+                continue
+            
+            if upper.startswith('NUM PEAKS:'):
+                in_peaks = True
+                continue
+            
+            if in_peaks:
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    try:
+                        peak_mz = parts[0]
+                        peak_int = parts[1]
+                        float(peak_mz)
+                        float(peak_int)
+                        current_peaks.append((peak_mz, peak_int))
+                    except ValueError:
+                        pass
+        
+        # 处理最后一个化合物
+        if current_name:
+            write_compound()
+    
+    print(f"  MS1注入: {n_with_ms1}/{n_total} 化合物成功关联到CSV同位素分布")
+    return output_ms, n_with_ms1, n_total
+
+
+# ============================================================
+# SIRIUS 进程清理
+# ============================================================
+
+def cleanup_sirius_processes(output_dir):
+    """清理可能持有项目文件锁的残留 SIRIUS 进程
+    
+    避免数据库锁定错误：Database is already opened in other process
+    """
+    import signal
+    
+    # 查找所有 SIRIUS Java 进程
+    result = subprocess.run(
+        ["pgrep", "-f", "sirius.*java"],
+        capture_output=True, text=True
+    )
+    
+    pids = result.stdout.strip().split('\n') if result.stdout.strip() else []
+    
+    if not pids or pids == ['']:
+        print("  无残留进程")
+        return
+    
+    killed_count = 0
+    for pid in pids:
+        if not pid:
+            continue
+        try:
+            # 检查进程是否与当前输出目录相关
+            cmd_result = subprocess.run(
+                ["ps", "-p", pid, "-o", "args="],
+                capture_output=True, text=True
+            )
+            cmd_line = cmd_result.stdout
+            
+            # 如果进程涉及当前输出目录，终止它
+            if output_dir in cmd_line or "project_" in cmd_line:
+                os.kill(int(pid), signal.SIGTERM)
+                killed_count += 1
+                print(f"  终止残留进程: PID {pid}")
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+    
+    if killed_count > 0:
+        print(f"  已清理 {killed_count} 个残留进程")
+        import time
+        time.sleep(2)  # 等待进程完全退出
+    else:
+        print("  无需清理")
+
+
+# ============================================================
+# SIRIUS 登录与命令执行
+# ============================================================
+
+def check_login_status():
+    """仅检测SIRIUS登录状态，不执行登录操作
+    
+    Returns:
+        bool: True 表示已登录，False 表示未登录
+    """
+    if not os.path.exists(SIRIUS_BIN):
+        return False
+    
+    result = subprocess.run(["bash", SIRIUS_BIN, "login", "--show"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, timeout=60)
+    
+    return "Active Subscription is:" in result.stdout or "Logged in as:" in result.stdout
+
+
+def force_login():
+    """无条件强制执行SIRIUS登录（不检查当前状态）
+    
+    SIRIUS 6.3.3 的 token 会过期，且 formulas 步骤不需要登录但耗时较长，
+    导致 fingerprints/structures 执行时 token 可能已过期。
+    因此在需要联网的步骤前，应直接强制登录刷新 token。
+    """
+    import time
+    print("  强制刷新SIRIUS登录...")
+    
+    if not os.path.exists(SIRIUS_BIN):
+        print(f"  错误: SIRIUS不存在: {SIRIUS_BIN}")
+        return False
+    
+    if not os.path.exists(SIRIUS_LOGIN_SCRIPT):
+        print(f"  警告: 登录脚本不存在: {SIRIUS_LOGIN_SCRIPT}")
+        return False
+    
+    try:
+        subprocess.run(["bash", SIRIUS_LOGIN_SCRIPT], 
+                       check=True, timeout=120,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        time.sleep(2)
+        
+        # 验证登录成功
+        for attempt in range(3):
+            verify = subprocess.run(["bash", SIRIUS_BIN, "login", "--show"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, timeout=60)
+            if "Active Subscription is:" in verify.stdout or "Logged in as:" in verify.stdout:
+                print("  登录成功")
+                return True
+            if attempt < 2:
+                print(f"  等待 token 同步... ({attempt + 1}/3)")
+                time.sleep(2)
+        
+        print("  [警告] 登录脚本已执行但验证未通过，登录可能失败")
+        return False
+    except Exception as e:
+        print(f"  [错误] 登录失败: {e}")
+        return False
+
+
+def check_and_login():
+    """检查SIRIUS登录状态，未登录则自动登录"""
+    import time
+    print("  检查SIRIUS登录状态...")
+
+    if not os.path.exists(SIRIUS_BIN):
+        print(f"  错误: SIRIUS不存在: {SIRIUS_BIN}")
+        return False
+
+    result = subprocess.run(["bash", SIRIUS_BIN, "login", "--show"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, timeout=60)
+
+    if "Active Subscription is:" in result.stdout or "Logged in as:" in result.stdout:
+        print("  已登录")
+        return True
+    else:
+        print("  未登录，尝试登录...")
+        return force_login()
+
+
+def break_nitrite_lock(project_path):
+    """通过复制项目文件来打破 Nitrite 数据库锁
+    
+    SIRIUS 6.3.3 的 Nitrite DB 在进程退出后不总是正确释放文件锁,
+    导致后续步骤遇到 "Database is already opened in other process" 错误,
+    且 SIRIUS 即使失败也返回 exit code 0 (静默失败).
+    
+    解决方案: cp 复制文件 → 替换原文件, 新文件没有锁标记.
+    """
+    import shutil
+    if not os.path.exists(project_path):
+        return
+    tmp_path = project_path + ".unlocked"
+    try:
+        shutil.copy2(project_path, tmp_path)
+        os.replace(tmp_path, project_path)
+    except Exception as e:
+        print(f"  [警告] 清除数据库锁失败: {e}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def run_sirius_command(command, description):
+    """执行SIRIUS命令，支持自动重登和数据库锁检测
+    
+    关键增强: 
+    1. 检测 "Database is already opened" 错误并自动重试 (复制项目文件打破锁)
+    2. 检测 "Login ERROR" 并自动重新登录后重试
+    3. 通过解析输出中的 "Computed N instances" 验证实际执行结果
+    注意: SIRIUS 6.3.3 即使内部失败也可能返回 exit code 0, 不能仅依赖退出码判断成功
+    """
+    print(f"\n  >>> {description}")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            output_lines = []
+            db_lock_error = False
+            login_error = False
+            computed_instances = False
+
+            for line in process.stdout:
+                print(f"    {line}", end="")
+                output_lines.append(line)
+                
+                if "Database is already opened" in line or "Error occurred while initializing the database" in line:
+                    db_lock_error = True
+                if "Login ERROR" in line or "Please Login" in line:
+                    login_error = True
+                if "Computed" in line and "instances" in line:
+                    computed_instances = True
+
+            process.wait()
+            
+            # 数据库锁错误 → 复制项目文件打破锁后重试
+            if db_lock_error:
+                if attempt < max_retries - 1:
+                    print(f"\n  [DB锁] 检测到数据库锁定错误, 尝试解锁后重试 ({attempt+1}/{max_retries})...")
+                    # 从命令行参数中提取项目路径 (-o 参数后面的值)
+                    for i, arg in enumerate(command):
+                        if arg == "-o" and i + 1 < len(command):
+                            break_nitrite_lock(command[i + 1])
+                            break
+                        if arg == "-i" and i + 1 < len(command):
+                            break_nitrite_lock(command[i + 1])
+                    import time
+                    time.sleep(3)
+                    continue
+                else:
+                    print(f"  [失败] {description} (数据库锁无法解除)")
+                    return False
+            
+            # 登录错误 → 强制重新登录后重试
+            if login_error:
+                if attempt < max_retries - 1:
+                    print(f"\n  [登录] 检测到登录错误, 强制重新登录后重试...")
+                    force_login()
+                    continue
+                else:
+                    print(f"  [失败] {description} (登录重试失败)")
+                    return False
+            
+            if process.returncode == 0 and not db_lock_error and not login_error:
+                print(f"  [完成] {description}")
+                return True
+            else:
+                if attempt < max_retries - 1:
+                    print(f"  [重试] {description} (退出码: {process.returncode})")
+                    continue
+                print(f"  [失败] {description} (退出码: {process.returncode})")
+                return False
+                
+        except Exception as e:
+            print(f"  [异常] {description}: {e}")
+            if attempt < max_retries - 1:
+                continue
+            return False
+    
+    return False
+
+
+def export_sirius_csv(project_path, output_dir):
+    """导出SIRIUS结果为CSV格式，并生成标准化的L4_identified.csv
+    
+    重要: SIRIUS 6.3.3 的 summaries 命令必须在登录状态下才能导出结构数据。
+    未登录时 summaries 仍会执行并返回 exit code 0，但 structure_identifications.csv 
+    仅含表头（0条数据），这是一个已知的静默失败行为。
+    """
+    csv_output_dir = str(Path(output_dir) / 'csv_summaries')
+    os.makedirs(csv_output_dir, exist_ok=True)
+    
+    # 【关键】导出前必须确保登录状态有效
+    # SIRIUS 6.3.3 的 summaries 在未登录时不会报错，但会导出空的结构结果
+    print("  [导出] 验证SIRIUS登录状态...")
+    if not check_and_login():
+        print("  [导出] 警告: SIRIUS未登录，summaries可能无法导出结构数据")
+    
+    # 注意: 不使用 --top-hit-summary，因为该参数会过滤掉低置信度结构结果
+    # 对于仅有MS2（无MS1同位素模式）的MSP数据，结构置信度普遍偏低，
+    # 使用 --top-hit-summary 会导致几乎所有结构结果被过滤为空
+    cmd_summaries = [
+        "bash", SIRIUS_BIN,
+        "-i", project_path,
+        "-o", project_path,
+        "summaries",
+        "--format=CSV",
+        "--output", csv_output_dir
+    ]
+    
+    try:
+        result = subprocess.run(
+            cmd_summaries,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        
+        if result.returncode == 0:
+            # 检查是否输出中包含登录错误（SIRIUS即使报Login ERROR也可能返回0）
+            if "Login ERROR" in (result.stdout or "") or "Login ERROR" in (result.stderr or ""):
+                print("  [导出] 检测到Login ERROR，尝试重新登录后重试...")
+                if check_and_login():
+                    result = subprocess.run(
+                        cmd_summaries,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+            
+            csv_files = [str(f) for f in Path(csv_output_dir).rglob("*.csv")]
+            
+            if csv_files:
+                # 验证结构结果是否导出成功
+                struct_csv = Path(csv_output_dir) / 'structure_identifications.csv'
+                if struct_csv.exists():
+                    with open(struct_csv, 'r') as f:
+                        line_count = sum(1 for _ in f)
+                    if line_count <= 1:
+                        print(f"  [导出] 警告: structure_identifications.csv 仅有表头（{line_count}行），结构数据可能未成功导出")
+                        print(f"  [导出]   可能原因: SIRIUS登录状态无效或token已过期")
+                    else:
+                        print(f"  [导出] structure_identifications.csv 导出 {line_count - 1} 条结构")
+                
+                _create_l4_identified_csv(csv_files, output_dir)
+                return csv_files
+            else:
+                return []
+        else:
+            return []
+    except Exception:
+        return []
+
+
+def _create_l4_identified_csv(csv_files, output_dir):
+    """从SIRIUS导出的CSV中提取关键信息，生成标准化的L4_identified.csv
+    
+    优先级: structure_identifications > formula_identifications > 其他
+    structure可能为空（未知化合物在标准库中无匹配），此时回退到formula结果
+    """
+    import shutil
+    
+    l4_csv_path = Path(output_dir) / 'L4_identified.csv'
+    
+    csv_name_map = {Path(csv_file).name.lower(): csv_file for csv_file in csv_files}
+    
+    priority_list = [
+        'structure_identifications.csv',
+        'formula_identifications.csv',
+        'compound_identifications.csv',
+    ]
+    
+    best_csv = None
+    for target_name in priority_list:
+        if target_name in csv_name_map:
+            candidate = csv_name_map[target_name]
+            try:
+                df_check = pd.read_csv(candidate, nrows=1)
+                if len(df_check) > 0:
+                    best_csv = candidate
+                    break
+            except Exception:
+                continue
+    
+    if not best_csv:
+        for csv_file in csv_files:
+            try:
+                df_check = pd.read_csv(csv_file, nrows=1)
+                if len(df_check) > 0:
+                    best_csv = csv_file
+                    break
+            except Exception:
+                continue
+    
+    if not best_csv:
+        return
+    
+    try:
+        df = pd.read_csv(best_csv)
+        
+        col_mapping = {}
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'smiles' in col_lower:
+                col_mapping[col] = 'matched_smiles'
+            elif col_lower in ('molecularformula', 'molecular_formula', 'formula'):
+                col_mapping[col] = 'matched_formula'
+            elif col_lower in ('inchikey2d', 'inchikey', 'inchi_key'):
+                col_mapping[col] = 'matched_inchikey'
+            elif 'name' in col_lower and 'file' not in col_lower and 'mapping' not in col_lower:
+                col_mapping[col] = 'matched_name'
+            elif col_lower == 'ionmass':
+                col_mapping[col] = 'query_precursor_mz'
+            elif 'precursor' in col_lower and 'mz' in col_lower:
+                col_mapping[col] = 'query_precursor_mz'
+            elif col_lower in ('adduct', 'precursoriontype', 'ionization'):
+                col_mapping[col] = 'matched_precursor_type'
+        
+        if col_mapping:
+            df = df.rename(columns=col_mapping)
+        
+        df['identification_source'] = 'L4_SIRIUS'
+        
+        # 构造 query_name 列（下游 CSV关联 依赖此列提取 compound_id）
+        # SIRIUS CSV 的 'id' 列包含原始化合物名（如 "Unknown (10.10_380.1323m/z)"）
+        # 'featureId' 列可能也包含类似信息
+        if 'query_name' not in df.columns:
+            id_col = None
+            for candidate in ['id', 'featureId', 'feature_id', 'compoundId']:
+                if candidate in df.columns:
+                    id_col = candidate
+                    break
+            
+            if id_col:
+                df['query_name'] = df[id_col]
+            elif 'query_precursor_mz' in df.columns:
+                # 最后兜底：用 precursor_mz 构造
+                df['query_name'] = df['query_precursor_mz'].apply(
+                    lambda mz: f"Unknown ({mz})" if pd.notna(mz) else 'Unknown')
+            else:
+                df['query_name'] = 'Unknown'
+        
+        if 'matched_name' not in df.columns:
+            if 'matched_formula' in df.columns:
+                df['matched_name'] = df['matched_formula']
+            else:
+                df['matched_name'] = 'Unknown'
+        
+        if 'matched_smiles' not in df.columns:
+            df['matched_smiles'] = 'N/A'
+            
+        if 'matched_inchikey' not in df.columns:
+            df['matched_inchikey'] = 'N/A'
+            
+        df['structure_confidence'] = 'putative'
+        
+        temp_csv = Path(output_dir) / 'L4_identified_temp.csv'
+        df.to_csv(temp_csv, index=False, encoding='utf-8')
+        
+        summary_script = Path(__file__).parent.parent / "辅助功能" / "各层鉴定结果汇总" / "各层鉴定结果汇总.py"
+        if summary_script.exists():
+            import subprocess
+            summary_cmd = [
+                sys.executable, str(summary_script),
+                "--input", str(temp_csv),
+                "--output", str(l4_csv_path),
+                "--level", "L4"
+            ]
+            try:
+                subprocess.run(summary_cmd, check=True)
+            except Exception:
+                shutil.move(str(temp_csv), str(l4_csv_path))
+        else:
+            shutil.move(str(temp_csv), str(l4_csv_path))
+        
+        if temp_csv.exists():
+            temp_csv.unlink()
+    except Exception:
+        shutil.copy2(best_csv, str(l4_csv_path))
+
+
+# ============================================================
+# 主函数
+# ============================================================
+
+def main():
+    args = parse_arguments()
+
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path(args.sample_msp).parent / 'four_layer_results' / 'L4_results'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    instrument = args.instrument.lower()
+
+    print("=" * 70)
+    print(f"L4: SIRIUS 从头鉴定 | {args.sample_msp} | {instrument.upper()} | {args.database}")
+    print("=" * 70)
+
+    # ===== [0/7] 清理残留进程 =====
+    # 避免数据库锁定问题：终止可能持有项目文件锁的旧 SIRIUS 进程
+    print("\n[0/7] 检查并清理残留SIRIUS进程...")
+    cleanup_sirius_processes(str(output_dir))
+
+    if not os.path.exists(args.sample_msp):
+        print(f"错误: 输入文件不存在: {args.sample_msp}")
+        return False
+
+    cluster_map = load_cluster_info(args.sample_msp)
+
+    if not os.path.exists(SIRIUS_BIN):
+        print(f"错误: SIRIUS不存在: {SIRIUS_BIN}")
+        return False
+
+    # ===== [1/7] 预处理MSP =====
+    print("\n[1/7] 预处理MSP文件...")
+    processed_msp = str(output_dir / 'L4_processed_input.msp')
+    processed_msp, n_compounds = preprocess_msp(
+        args.sample_msp, processed_msp, args.mz_threshold, args.ion_mode)
+
+    if n_compounds == 0:
+        print("  无化合物需要分析")
+        _write_summary(output_dir, args, 0, {})
+        return True
+
+    # ===== [1.5/7] MS1 同位素模式注入 =====
+    # 从预处理的 JSON 映射关联 MS1 同位素分布，生成 SIRIUS .ms 格式文件
+    # 这样 SIRIUS 能利用 MS1 同位素模式改善分子式排序和结构置信度
+    sirius_input = processed_msp  # 默认使用 MSP
+    if ISOTOPE_MAP and os.path.exists(ISOTOPE_MAP):
+        print("\n[1.5/7] 注入 MS1 同位素模式（从预处理映射）...")
+        ms_with_ms1 = str(output_dir / 'L4_input_with_ms1.ms')
+        ms_with_ms1, n_with_ms1, n_total = convert_msp_to_ms_with_ms1(
+            processed_msp, ISOTOPE_MAP, ms_with_ms1)
+        if n_with_ms1 > 0:
+            sirius_input = ms_with_ms1
+            print(f"  SIRIUS将使用带MS1的 .ms 格式输入 ({n_with_ms1}/{n_total} 化合物含同位素模式)")
+        else:
+            print(f"  未关联到任何同位素分布，继续使用MSP输入")
+    else:
+        print("  [提示] 未提供同位素映射文件，跳过 MS1 注入（SIRIUS 将缺少同位素信息）")
+
+    # ===== [2/7] 准备项目文件 =====
+    # 注意：登录验证推迟到 structures 步骤前执行
+    # formulas/fingerprints 不需要联网，只有 structures (CSI:FingerID) 需要联网
+    
+    project_path = str(output_dir / f"project_{instrument}.sirius")
+
+    # ===== [3/7] Formulas 分子式预测 =====
+    print("\n[3/7] 分子式预测 (Formulas)...")
+    cmd_formulas = [
+        "bash", SIRIUS_BIN,
+        "--cores", str(SIRIUS_CORES),
+        "--buffer", str(SIRIUS_BUFFER),
+        "-i", sirius_input, "-o", project_path, "formulas",
+        "--candidates", str(FORMULA_CANDIDATES),
+        "--candidates-per-ionization", str(FORMULA_CANDIDATES_PER_ION),
+        "-e", DETECTABLE_ELEMENTS,
+        "-E", ENFORCED_ELEMENTS,
+        "--fix-lipids", FIX_LIPIDS,
+        "--heuristic", str(HEURISTIC_THRESHOLD),
+        "--heuristic-only", str(HEURISTIC_ONLY_THRESHOLD),
+        "--compound-timeout", str(COMPOUND_TIMEOUT),
+        "--tree-timeout", str(TREE_TIMEOUT),
+    ]
+
+    if instrument == 'orbi':
+        cmd_formulas.extend(["--profile", "orbitrap", "--ppm-max", "5"])
+    else:
+        cmd_formulas.extend(["--profile", "qtof", "--ppm-max", "10"])
+
+    step_results = {}
+    if run_sirius_command(cmd_formulas, "Formulas (分子式预测)"):
+        step_results['formulas'] = 'SUCCESS'
+    else:
+        step_results['formulas'] = 'FAILED'
+        print("  分子式预测失败，终止后续步骤")
+        _write_summary(output_dir, args, n_compounds, step_results)
+        return False
+
+    # 【关键】formulas 完成后主动解锁项目文件
+    # SIRIUS 6.3.3 Nitrite DB 不总是正确释放锁, 导致后续步骤静默失败
+    break_nitrite_lock(project_path)
+
+
+    # ===== [3.5/7] Zodiac 分子式置信度重排序 =====
+    # Zodiac 是关键步骤！它使用图神经网络对分子式候选进行重排序，
+    # 生成 ZodiacScore。没有这一步，后续的 fingerprints 和 structures
+    # 无法正确工作，导致 structure_identifications.csv 为空。
+    print("\n[3.5/7] 分子式置信度重排序 (Zodiac)...")
+    
+    cmd_zodiac = [
+        "bash", SIRIUS_BIN,
+        "--cores", str(SIRIUS_CORES),
+        "-i", project_path, "-o", project_path, "zodiac",
+    ]
+    if run_sirius_command(cmd_zodiac, "Zodiac (分子式置信度重排序)"):
+        step_results['zodiac'] = 'SUCCESS'
+    else:
+        step_results['zodiac'] = 'FAILED'
+        print("  [警告] Zodiac 步骤失败，结构搜索结果可能受影响")
+        # 不终止，继续尝试后续步骤
+    
+    # zodiac 完成后解锁
+    break_nitrite_lock(project_path)
+    # ===== [4/7] Fingerprints 分子指纹预测 =====
+    print("\n[4/7] 分子指纹预测 (Fingerprints)...")
+    
+    # 【关键】fingerprints 需要联网 (发送碎片树到服务器预测分子指纹)
+    # formulas 步骤可能耗时很长导致 token 过期，因此这里强制重新登录
+    print("  [fingerprints] 强制刷新SIRIUS登录（防止 token 过期）...")
+    if not force_login():
+        print("  [fingerprints] 警告: SIRIUS登录失败，指纹预测可能失败")
+    
+    cmd_fingerprints = [
+        "bash", SIRIUS_BIN,
+        "--cores", str(SIRIUS_CORES),
+        "-i", project_path, "-o", project_path, "fingerprints",
+    ]
+    if run_sirius_command(cmd_fingerprints, "Fingerprints (分子指纹预测)"):
+        step_results['fingerprints'] = 'SUCCESS'
+    else:
+        step_results['fingerprints'] = 'FAILED'
+        print("  指纹预测失败，结构搜索将无法进行")
+        _write_summary(output_dir, args, n_compounds, step_results)
+        return False
+
+    # 【关键】fingerprints 完成后主动解锁项目文件
+    break_nitrite_lock(project_path)
+
+    # ===== [5/7] Structures 结构搜索 =====
+    print("\n[5/7] 结构搜索...")
+    
+    # 【关键】structures 步骤需要调用 CSI:FingerID 云服务，必须在执行前确保登录有效
+    # fingerprints 步骤也涉及网络交互，token 可能进一步消耗，这里再次强制登录
+    print("  [structures] 强制刷新SIRIUS登录（CSI:FingerID 需要联网）...")
+    if not force_login():
+        print("  [structures] 警告: SIRIUS登录失败，结构搜索可能失败")
+    
+    cmd_structures = [
+        "bash", SIRIUS_BIN,
+        "--cores", str(SIRIUS_CORES),
+        "-i", project_path, "-o", project_path, "structures",
+        "--database", args.database,
+        "-e", EXPANSIVE_SEARCH,
+    ]
+    if run_sirius_command(cmd_structures, "Structures (结构数据库搜索)"):
+        step_results['structures'] = 'SUCCESS'
+        
+        # 【检测】structures 完成后检测登录状态
+        # 如果此时已登出，说明执行过程中 token 过期，结构鉴定可能不完整
+        if not check_login_status():
+            print("  [警告] structures 步骤完成后检测到登录状态已失效")
+            print("  [警告] 这可能意味着结构鉴定过程中 token 过期，部分结果可能丢失")
+            print("  [警告] 建议检查 structure_identifications.csv 是否有数据")
+    else:
+        step_results['structures'] = 'FAILED'
+        print("  结构搜索失败，跳过分类步骤")
+        _write_summary(output_dir, args, n_compounds, step_results)
+        return False
+
+    # structures 完成后解锁
+    break_nitrite_lock(project_path)
+
+    # ===== [6/7] Classes (CANOPUS分类) =====
+    print("\n[6/7] CANOPUS化合物分类...")
+    cmd_classes = [
+        "bash", SIRIUS_BIN,
+        "--cores", str(SIRIUS_CORES),
+        "-i", project_path, "-o", project_path, "classes",
+    ]
+    if run_sirius_command(cmd_classes, "Classes (CANOPUS分类)"):
+        step_results['classes'] = 'SUCCESS'
+    else:
+        step_results['classes'] = 'FAILED'
+
+    # classes 完成后解锁
+    break_nitrite_lock(project_path)
+
+    # ===== [7/7] Spectra-Search =====
+    print("\n[7/7] 谱图库搜索...")
+    cmd_spectra = [
+        "bash", SIRIUS_BIN,
+        "--cores", str(SIRIUS_CORES),
+        "-i", project_path, "-o", project_path, "spectra-search",
+        "--database", args.database,
+    ]
+    if run_sirius_command(cmd_spectra, "Spectra-Search (谱图库搜索)"):
+        step_results['spectra_search'] = 'SUCCESS'
+    else:
+        step_results['spectra_search'] = 'FAILED'
+
+    # spectra-search 完成后解锁 (summaries 导出也需要打开项目文件)
+    break_nitrite_lock(project_path)
+
+    csv_files = export_sirius_csv(project_path, str(output_dir))
+    
+    if csv_files and cluster_map:
+        for csv_file in csv_files:
+            add_cluster_to_csv(csv_file, cluster_map)
+    
+    _write_summary(output_dir, args, n_compounds, step_results, csv_files)
+
+    print("\n" + "=" * 70)
+    print(f"L4 鉴定完成 | 化合物: {n_compounds} | " + " | ".join(f"{k}: {v}" for k, v in step_results.items()))
+    print("=" * 70)
+
+    return True
+
+
+def _write_summary(output_dir, args, n_compounds, step_results, csv_files=None):
+    """写统计摘要"""
+    summary_file = Path(output_dir) / 'L4_summary.txt'
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write("=" * 60 + "\n")
+        f.write("L4 SIRIUS 从头鉴定统计\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"输入MSP: {args.sample_msp}\n")
+        f.write(f"仪器类型: {args.instrument}\n")
+        f.write(f"数据库: {args.database}\n\n")
+        f.write(f"待分析化合物数: {n_compounds}\n\n")
+        f.write("分析步骤状态:\n")
+        for step, status in step_results.items():
+            f.write(f"  {step}: {status}\n")
+        f.write("\n")
+        if csv_files:
+            f.write("CSV结果文件:\n")
+            for csv_file in csv_files:
+                f.write(f"  - {csv_file}\n")
+        else:
+            f.write("CSV结果文件: 无\n")
+        f.write("\n")
+        f.write("说明: SIRIUS项目文件包含详细的鉴定结果，\n")
+        f.write("可通过SIRIUS GUI或命令行工具提取具体化合物鉴定信息。\n")
+        f.write("=" * 60 + "\n")
+
+
+if __name__ == '__main__':
+    success = main()
+    sys.exit(0 if success else 1)
