@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Database cache files
+*.npz
+*.pkl
+*.hdf5
+*.h5
+
+# CFM-ID output logs
+cfmid_output/
+*.log
+
+# Large data files
+数据库/**/*.npz
+数据库/**/*.pkl
+数据库/**/*.hdf5
+数据库/**/cfmid_output/
+数据库/**/simulated_*
+
+# Project specific
+project_tof.sirius
+.verysync/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
