@@ -53,6 +53,8 @@ cfmid_output/
 数据库/**/*.hdf5
 数据库/**/cfmid_output/
 数据库/**/simulated_*
+数据库/*.sdf
+数据库/*.csv
 
 # Project specific
 project_tof.sirius
