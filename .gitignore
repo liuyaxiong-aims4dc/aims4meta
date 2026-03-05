@@ -48,6 +48,7 @@ cfmid_output/
 *.log
 
 # Large data files
+数据库/
 数据库/**/*.npz
 数据库/**/*.pkl
 数据库/**/*.hdf5
