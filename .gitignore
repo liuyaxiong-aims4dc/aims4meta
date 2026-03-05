@@ -65,6 +65,10 @@ project_tof.sirius
 .claude/
 .qoder/
 
+# External tool repositories (have their own .git)
+源代码/cfm-id-code/
+源代码/fiora/
+
 # OS
 .DS_Store
 Thumbs.db
