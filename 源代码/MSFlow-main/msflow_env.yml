@@ -1,0 +1,36 @@
+name: msflow
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch==2.7.0
+      - transformers==4.51.3
+      - accelerate==1.7.0
+      - pytorch-lightning==2.5.1.post0
+      - rdkit==2025.3.2
+      - datamol==0.12.5
+      - pandas==2.2.3
+      - numpy==1.26.4
+      - scipy==1.15.3
+      - scikit-learn==1.6.1
+      - matplotlib==3.10.3
+      - seaborn==0.13.2
+      - tqdm==4.67.1
+      - huggingface-hub==0.31.4
+      - datasets==3.6.0
+      - flow-matching==1.0.10
+      - safe-mol==0.1.13
+      - selfies==2.2.0
+      - wandb==0.19.11
+      - gdown==5.2.0
+      - mordred
+      - networkx==3.4.2
+      - umap-learn==0.5.9.post2
+      - numba==0.61.2
+      - torchmetrics==1.7.2
+      - torchdiffeq==0.2.5
+      - triton==3.3.0
+      - loguru==0.7.3
