@@ -1,0 +1,79 @@
+# SpectraVerse 数据配置
+# 用于 DiffMS 和 MSFlow 训练
+
+# 数据路径
+data:
+  # SpectraVerse 数据
+  msp_path: "/stor1/AIMS4Meta/数据库/spectraverse/spectraverse-1.0.1-pos_cleaned.msp"
+  
+  # SIRIUS 输出 (subformulae)
+  subform_folder: "/stor1/AIMS4Meta/模型训练/从头鉴定/2_phase/sirius_output/subformulae"
+  
+  # DreaMS 嵌入 (可选，用于对比)
+  dreams_embeddings: "/stor1/AIMS4Meta/数据库/spectraverse/spectraverse-1.0.1-pos_cleaned_dreams_emb.npz"
+  
+  # 数据划分
+  split:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+  random_seed: 42
+
+# SpectraVerse 统计信息
+stats:
+  total_spectra: 488797  # 正模式 350380 + 负模式 138417
+  pos_mode: 350380
+  neg_mode: 138417
+  unique_molecules: 36839
+  avg_peaks_per_spectrum: ~100
+
+# 编码器配置 (DiffMS/MIST)
+encoder:
+  # 模型
+  model_name: "SpectraEncoderGrowing"
+  form_embedder: "peakformula"  # 使用 SIRIUS subformulae
+  output_size: 512  # CDDD 维度
+  hidden_size: 512
+  spectra_dropout: 0.1
+  top_layers: 2
+  refine_layers: 3
+  
+  # 训练
+  batch_size: 64
+  learning_rate: 1e-4
+  epochs: 100
+  weight_decay: 0.01
+
+# 解码器配置 (MSFlow)
+decoder:
+  # 模型
+  model_name: "FlowMatchingDecoder"
+  vocab_size: 2000
+  max_length: 128
+  hidden_dim: 512
+  num_layers: 12
+  num_heads: 8
+  cond_dim: 512  # CDDD 维度
+  
+  # 训练
+  batch_size: 256
+  learning_rate: 1e-4
+  epochs: 200
+  weight_decay: 0.01
+  uncond_prob: 0.1  # classifier-free guidance
+
+# 评估配置
+evaluation:
+  metrics:
+    - "top1_accuracy"
+    - "top5_accuracy"
+    - "tanimoto_similarity"
+    - "validity"
+    - "uniqueness"
+  num_candidates: 10
+
+# 输出路径
+output:
+  encoder_checkpoint: "/stor1/AIMS4Meta/模型训练/从头鉴定/2_phase/checkpoints/encoder"
+  decoder_checkpoint: "/stor1/AIMS4Meta/模型训练/从头鉴定/2_phase/checkpoints/decoder"
+  results: "/stor1/AIMS4Meta/模型训练/从头鉴定/2_phase/results"

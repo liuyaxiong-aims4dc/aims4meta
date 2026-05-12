@@ -64,8 +64,8 @@ L3_ONLINE_DATABASES = ["BIO"]
 # ============================================================
 
 # ----- 样品数据 -----
-SAMPLE = "/stor1/微力临时文件共享/20260508kangfengshi/kangfengshi-POS.msp"
-ION_MODE = "pos"  # 离子模式: "POS" 或 "NEG"，仅支持单选项
+SAMPLE = "/stor1/微力临时文件共享/20260508kangfengshi/kangfengshi-NEG.msp"
+ION_MODE = "NEG"  # 离子模式: "POS" 或 "NEG"，仅支持单选项
 
 # ----- 输出设置 -----
 OUTPUT_BASE_DIR = ""  # 输出根目录（留空则使用样品文件同级目录）
