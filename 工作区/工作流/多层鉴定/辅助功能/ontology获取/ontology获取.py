@@ -7,6 +7,8 @@ SIRIUS CANOPUS Ontology 分类获取脚本
 来源（无外部 API 依赖）：
   1. SIRIUS CANOPUS TSV 直读（本轮 L3 结果）
   2. ontology_sirius_cache.json 持久化缓存（跨 run 积累）
+  3. CANOPUS 实时计算（为 L1/L2 来源但未进入 L3 的化合物单独运行 SIRIUS formula+canopus）
+     启用条件：同时传入 --canopus_fallback --sample_msp --ion_mode
 
 模式：
   - CSV 模式： --input_csv + --output_csv，为鉴定结果 CSV 填充 ontology 列
@@ -20,6 +22,11 @@ import argparse
 import pandas as pd
 import os
 import sys
+import tempfile
+import subprocess
+
+# SIRIUS 默认路径（与 L3_SIRIUS_CLI.py 保持一致）
+DEFAULT_SIRIUS_BIN = "/stor3/AIMS4Meta/源代码/SIRIUS/sirius-6.3.5-linux-x64/sirius/bin/sirius"
 
 # 配置日志
 logging.basicConfig(
@@ -329,8 +336,271 @@ def build_cache_from_results(results_dirs: list, dry_run: bool = False) -> int:
     return total_added
 
 
+# ============================================================
+# CANOPUS 实时计算（为 L1/L2 来源但未进 L3 的化合物单独跑 SIRIUS）
+# ============================================================
+
+def _parse_sample_msp(path: str) -> dict:
+    """解析样品 MSP 文件，返回 {name: {key: value, 'peaks': [(mz, int), ...]}}"""
+    entries = {}
+    current_name = None
+    current = {}
+    current_peaks = []
+    in_peaks = False
+    if not os.path.exists(path):
+        return entries
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            s = line.rstrip('\n').rstrip('\r')
+            if not s.strip():
+                if current_name and current_peaks:
+                    current['peaks'] = list(current_peaks)
+                    entries[current_name] = dict(current)
+                current_name = None
+                current = {}
+                current_peaks = []
+                in_peaks = False
+                continue
+            lower = s.lower()
+            if lower.startswith('name:'):
+                if current_name and current_peaks:
+                    current['peaks'] = list(current_peaks)
+                    entries[current_name] = dict(current)
+                current_name = s.split(':', 1)[1].strip()
+                current = {'_raw_name': current_name}
+                current_peaks = []
+                in_peaks = False
+            elif lower.startswith('precursormz:') or lower.startswith('precursor_mz:'):
+                current['precursormz'] = s.split(':', 1)[1].strip()
+            elif lower.startswith('precursortype:') or lower.startswith('adduct:'):
+                current['precursortype'] = s.split(':', 1)[1].strip()
+            elif lower.startswith('charge:'):
+                current['charge'] = s.split(':', 1)[1].strip()
+            elif lower.startswith('formula:'):
+                current['formula'] = s.split(':', 1)[1].strip()
+            elif lower.startswith('smiles:'):
+                current['smiles'] = s.split(':', 1)[1].strip()
+            elif lower.startswith('num peaks:') or lower.startswith('num_peaks:'):
+                in_peaks = True
+            elif in_peaks:
+                parts = s.split()
+                if len(parts) >= 2:
+                    try:
+                        mz = float(parts[0])
+                        intensity = float(parts[1])
+                        current_peaks.append((mz, intensity))
+                    except ValueError:
+                        pass
+        if current_name and current_peaks:
+            current['peaks'] = list(current_peaks)
+            entries[current_name] = dict(current)
+    return entries
+
+
+def _match_query_name(query_name: str, msp_names: set) -> Optional[str]:
+    """在 MSP NAME 列表中匹配 query_name"""
+    qn = str(query_name).strip()
+    if not qn:
+        return None
+    # 精确匹配
+    if qn in msp_names:
+        return qn
+    # 去掉前缀后匹配（例如 _L3_processed_Unknown (1.34_407)m/z → Unknown (1.34_407)m/z）
+    for sep in ('_L3_processed_', '_L4_processed_', '_processed_'):
+        if sep in qn:
+            short = qn.split(sep, 1)[-1].strip()
+            if short in msp_names:
+                return short
+    # 提取 RT_m/z 做模糊匹配
+    import re
+    m = re.search(r'\(([\d.]+)_([\d.]+)[mn]', qn)
+    if m:
+        rt, mz_val = m.group(1), m.group(2)
+        for name in msp_names:
+            if rt in name and mz_val in name:
+                return name
+    return None
+
+
+def run_canopus_fallback(unmatched_df, sirius_bin, sample_msp, ion_mode,
+                         instrument, classification_field, identifier_col):
+    """
+    为未命中的化合物运行 SIRIUS formula + canopus，将结果写入持久化缓存。
+
+    仅运行 formula + fingerprint + canopus（跳 structure），~10-15s/compound。
+    formula 直接从 L1/L2 已知分子式写入 MSP（无搜索），大幅加速。
+    """
+    logger.info("="*60)
+    logger.info(f"[CANOPUS 实时计算] 开始为 {len(unmatched_df)} 个化合物运行 SIRIUS CANOPUS")
+
+    if not os.path.exists(sirius_bin) or not os.access(sirius_bin, os.X_OK):
+        logger.warning(f"[CANOPUS 实时计算] SIRIUS 不可用: {sirius_bin}")
+        return 0
+
+    if not os.path.exists(sample_msp):
+        logger.warning(f"[CANOPUS 实时计算] 样品 MSP 不存在: {sample_msp}")
+        return 0
+
+    # 1. 解析样品 MSP
+    logger.info(f"[CANOPUS 实时计算] 解析 MSP: {sample_msp}")
+    msp_entries = _parse_sample_msp(sample_msp)
+    msp_names = set(msp_entries.keys())
+    logger.info(f"[CANOPUS 实时计算] MSP 中共 {len(msp_names)} 条谱图")
+
+    # 2. 匹配 query_name → MSP NAME
+    query_to_info = {}
+    for _, row in unmatched_df.iterrows():
+        qname = str(row.get('query_name', '')).strip()
+        if not qname:
+            continue
+        matched = _match_query_name(qname, msp_names)
+        if matched:
+            formula = str(row.get(identifier_col.replace('smiles', 'formula').replace('SMILES', 'formula'), ''))
+            if not formula or formula == 'nan':
+                # 尝试从 matched_formula 列获取
+                formula = str(row.get('matched_formula', ''))
+            smiles = str(row.get(identifier_col, '')).strip()
+            query_to_info[qname] = {
+                'msp_name': matched,
+                'formula': formula if formula and formula != 'nan' else '',
+                'smiles': smiles if smiles and smiles != 'nan' else '',
+            }
+
+    if not query_to_info:
+        logger.warning(f"[CANOPUS 实时计算] 无化合物可匹配到 MSP 谱图，跳过")
+        return 0
+
+    logger.info(f"[CANOPUS 实时计算] 匹配到 {len(query_to_info)}/{len(unmatched_df)} 个化合物")
+
+    # 3. 构建 mini MSP（SIRIUS 兼容格式）
+    adduct = '[M+H]+,[M+Na]+' if ion_mode == 'POS' else '[M-H]-'
+    ion_mode_str = 'Positive' if ion_mode == 'POS' else 'Negative'
+    msp_lines = []
+    for qname, info in query_to_info.items():
+        entry = msp_entries.get(info['msp_name'])
+        if not entry or not entry.get('peaks'):
+            continue
+        msp_lines.append(f"NAME: {info['msp_name']}")
+        msp_lines.append(f"PRECURSORMZ: {entry.get('precursormz', '')}")
+        msp_lines.append(f"PRECURSORTYPE: {adduct}")
+        msp_lines.append(f"IONMODE: {ion_mode_str}")
+        if info['formula']:
+            msp_lines.append(f"FORMULA: {info['formula']}")
+        if info['smiles']:
+            msp_lines.append(f"SMILES: {info['smiles']}")
+        msp_lines.append(f"Num Peaks: {len(entry['peaks'])}")
+        for mz, intensity in entry['peaks']:
+            msp_lines.append(f"{mz} {intensity}")
+        msp_lines.append("")
+
+    if not msp_lines:
+        logger.warning(f"[CANOPUS 实时计算] 构建 MSP 后无有效条目，跳过")
+        return 0
+
+    msp_content = '\n'.join(msp_lines)
+    logger.info(f"[CANOPUS 实时计算] 构建 mini MSP: {len([l for l in msp_lines if l.startswith('NAME:')])} 个化合物")
+
+    # 4. 写入临时文件并运行 SIRIUS
+    profile = 'orbitrap' if instrument == 'orbitrap' else 'qtof'
+    with tempfile.TemporaryDirectory(prefix='ontology_canopus_') as tmpdir:
+        mini_msp = os.path.join(tmpdir, 'mini.msp')
+        project = os.path.join(tmpdir, 'project.sirius')
+        with open(mini_msp, 'w', encoding='utf-8') as f:
+            f.write(msp_content)
+
+        # Formula
+        logger.info(f"[CANOPUS 实时计算] 步骤1/3: Formula 预测（公式已约束）...")
+        cmd_formula = [
+            sirius_bin, '--cores', str(min(8, os.cpu_count() or 4)),
+            '-i', mini_msp, '-o', project,
+            'formula', '-c', '10', '-p', profile,
+            '-I', adduct, '-i', '',
+        ]
+        try:
+            subprocess.run(cmd_formula, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            logger.warning("[CANOPUS 实时计算] Formula 步骤超时")
+            return 0
+        except Exception as e:
+            logger.warning(f"[CANOPUS 实时计算] Formula 步骤失败: {e}")
+            return 0
+
+        # Fingerprint
+        logger.info(f"[CANOPUS 实时计算] 步骤2/3: Fingerprint 预测...")
+        cmd_fp = [sirius_bin, '-i', project, '-o', project, 'fingerprint']
+        try:
+            subprocess.run(cmd_fp, capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            logger.warning(f"[CANOPUS 实时计算] Fingerprint 步骤失败: {e}")
+            return 0
+
+        # CANOPUS
+        logger.info(f"[CANOPUS 实时计算] 步骤3/3: CANOPUS 分类...")
+        cmd_cano = [sirius_bin, '-i', project, '-o', project, 'canopus']
+        try:
+            result = subprocess.run(cmd_cano, capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            logger.warning(f"[CANOPUS 实时计算] CANOPUS 步骤失败: {e}")
+            return 0
+
+        # 5. 读取 CANOPUS TSV
+        tsv_path = os.path.join(project, 'canopus_formula_summary.tsv')
+        if not os.path.exists(tsv_path):
+            logger.warning("[CANOPUS 实时计算] canopus_formula_summary.tsv 未生成")
+            return 0
+
+        col_name = CANOPUS_FIELD_MAP.get(classification_field)
+        if not col_name:
+            return 0
+
+        try:
+            tdf = pd.read_csv(tsv_path, sep='\t', dtype=str, keep_default_na=False)
+        except Exception as e:
+            logger.warning(f"[CANOPUS 实时计算] 读取 TSV 失败: {e}")
+            return 0
+
+        if col_name not in tdf.columns:
+            logger.warning(f"[CANOPUS 实时计算] TSV 缺少 {col_name} 列")
+            return 0
+
+        # 6. 写入缓存：SMILES → classification
+        sirius_cache = _load_sirius_cache()
+        added = 0
+        for _, row in tdf.iterrows():
+            cls = str(row.get(col_name, '')).strip()
+            if not cls:
+                continue
+            # 找对应的 SMILES（通过 mappingFeatureId）
+            feat_id = str(row.get('mappingFeatureId', '')).strip()
+            smiles_found = None
+            for qname, info in query_to_info.items():
+                msp_name = info['msp_name']
+                if msp_name in feat_id or feat_id in msp_name or msp_name.replace('Unknown (','').rstrip(')').replace(' ','') in feat_id:
+                    smiles_found = info['smiles']
+                    break
+            if not smiles_found:
+                continue
+            cache_key = f"{smiles_found}_{classification_field}_sirius"
+            if cache_key not in sirius_cache:
+                sirius_cache[cache_key] = cls
+                added += 1
+
+        if added:
+            _save_sirius_cache(sirius_cache)
+            logger.info(f"[CANOPUS 实时计算] 写入缓存 {added} 条新记录（共 {len(sirius_cache)} 条）")
+        else:
+            logger.info("[CANOPUS 实时计算] 未产生新的缓存记录")
+
+        return added
+
+
+# ============================================================
+
 def process_csv(input_csv: str, output_csv: str, classification_field: str = "class",
-                force_refresh: bool = False, sirius_results_dir: Optional[str] = None):
+                force_refresh: bool = False, sirius_results_dir: Optional[str] = None,
+                canopus_fallback: bool = False, sample_msp_path: Optional[str] = None,
+                sirius_bin: Optional[str] = None, ion_mode: Optional[str] = None,
+                instrument: str = "qtof"):
     """
     处理CSV文件，为每个化合物获取 ontology 分类
 
@@ -432,6 +702,45 @@ def process_csv(input_csv: str, output_csv: str, classification_field: str = "cl
         logger.info(f"[来源: SIRIUS缓存] {cache_filled} 条 ontology 从持久化缓存命中")
 
     fail_count = needs_query.sum() - cache_filled
+
+    # 优先级 3：CANOPUS 实时计算（为 L1/L2 来源但未进入 L3 的化合物单独运行 SIRIUS formula+canopus）
+    candidate_mask = needs_query & df[identifier_col].notna() & (df[identifier_col] != '') & (df[identifier_col] != 'nan')
+    if fail_count > 0 and canopus_fallback and sample_msp_path and sirius_bin and ion_mode:
+        if candidate_mask.sum() > 0:
+            try:
+                logger.info(f"\n{'='*60}")
+                logger.info(f"[来源: CANOPUS 实时计算] 为 {candidate_mask.sum()} 个有 SMILES 的未命中化合物运行 SIRIUS CANOPUS...")
+                added = run_canopus_fallback(
+                    unmatched_df=df[candidate_mask].copy(),
+                    sirius_bin=sirius_bin or DEFAULT_SIRIUS_BIN,
+                    sample_msp=sample_msp_path,
+                    ion_mode=ion_mode,
+                    instrument=instrument,
+                    classification_field=classification_field,
+                    identifier_col=identifier_col,
+                )
+                if added:
+                    # 重新加载缓存并回填
+                    sirius_cache = _load_sirius_cache()
+                    cache_filled2 = 0
+                    for idx in df[candidate_mask].index:
+                        smiles = str(df.at[idx, identifier_col]).strip()
+                        if not smiles or smiles == 'nan':
+                            continue
+                        cache_key = f"{smiles}_{classification_field}_sirius"
+                        cls = sirius_cache.get(cache_key)
+                        if cls:
+                            current = str(df.at[idx, 'matched_ontology']).strip()
+                            if not current or current == 'nan':
+                                df.at[idx, 'matched_ontology'] = cls
+                                cache_filled2 += 1
+                    logger.info(f"[来源: CANOPUS 新鲜] CANOPUS 实时计算完成，新填充 {cache_filled2} 条 ontology")
+                    fail_count -= cache_filled2
+            except Exception as e:
+                logger.warning(f"[来源: CANOPUS 实时计算] 运行异常（不影响主流程）: {e}")
+        else:
+            logger.info("[来源: CANOPUS 实时计算] 未命中化合物均缺少 SMILES，无法运行 CANOPUS")
+
     if fail_count > 0:
         logger.warning(f"未命中: {fail_count} 条（CANOPUS 缓存无记录，可能来自L1/L2鉴定且未进入L3流程）")
 
@@ -457,6 +766,16 @@ def main():
                        help="多层鉴定结果目录（可多个），缓存模式：扫描历史结果填充持久化缓存")
     parser.add_argument("--dry_run", action="store_true",
                        help="仅预览（缓存模式），不写缓存")
+    parser.add_argument("--canopus_fallback", action="store_true",
+                       help="为未命中化合物实时运行 SIRIUS CANOPUS（需配合 --sample_msp --ion_mode）")
+    parser.add_argument("--sample_msp", default=None,
+                       help="样品 MSP 路径（CANOPUS 实时计算用，提供 MS2 谱图）")
+    parser.add_argument("--sirius_bin", default=DEFAULT_SIRIUS_BIN,
+                       help="SIRIUS 可执行文件路径")
+    parser.add_argument("--ion_mode", default=None, choices=["POS", "NEG"],
+                       help="离子模式（CANOPUS 实时计算用）")
+    parser.add_argument("--instrument", default="qtof", choices=["orbitrap", "qtof"],
+                       help="仪器类型（CANOPUS 实时计算用，默认 qtof）")
 
     args = parser.parse_args()
 
@@ -467,7 +786,13 @@ def main():
         # CSV 模式：为鉴定结果 CSV 填充 ontology 列
         if not args.output_csv:
             parser.error("CSV 模式需要 --output_csv")
-        process_csv(args.input_csv, args.output_csv, args.field, args.force_refresh, args.sirius_results_dir)
+        process_csv(args.input_csv, args.output_csv, args.field, args.force_refresh,
+                    args.sirius_results_dir,
+                    canopus_fallback=args.canopus_fallback,
+                    sample_msp_path=args.sample_msp,
+                    sirius_bin=args.sirius_bin,
+                    ion_mode=args.ion_mode,
+                    instrument=args.instrument)
     else:
         parser.error("请指定 --input_csv（CSV 模式） 或 --results_dir（缓存模式）")
 

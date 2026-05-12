@@ -1127,9 +1127,13 @@ def main():
         isotope_script = os.path.join(os.path.dirname(__file__), "辅助功能", "同位素相似度计算", "同位素相似度计算.py")
         run_script(isotope_script, ["--input", final_output, "--output", final_output], "dreams")
 
-        # 3. Ontology分类获取（优先本轮 SIRIUS CANOPUS TSV，否则 SIRIUS 持久化缓存）
+        # 3. Ontology分类获取（优先本轮 SIRIUS CANOPUS TSV，否则 SIRIUS 持久化缓存，最后实时 CANOPUS）
         ontology_script = os.path.join(os.path.dirname(__file__), "辅助功能", "ontology获取", "ontology获取.py")
-        ontology_args = ["--input_csv", final_output, "--output_csv", final_output, "--field", "class"]
+        ontology_args = [
+            "--input_csv", final_output, "--output_csv", final_output, "--field", "class",
+            "--canopus_fallback", "--sample_msp", args.sample,
+            "--ion_mode", args.ion_mode, "--instrument", L3_SIRIUS_INSTRUMENT,
+        ]
         l3_sirius_results_dir = os.path.join(args.output_dir, "L3_results", "sirius_results")
         if os.path.isdir(l3_sirius_results_dir):
             ontology_args += ["--sirius_results_dir", l3_sirius_results_dir]
