@@ -21,8 +21,9 @@ L3 SIRIUS 参数续传校验辅助脚本
       --sample_msp /path/to/input.msp \
       ... (同样的参数)
 
-追踪的参数：MSP身份、ion_mode、instrument、databases、mz_threshold、
+追踪的参数：ion_mode、instrument、databases、mz_threshold、
 min_peaks、min_intensity、sample_csv、加合物类型、formula候选数
+（注意：不含MSP身份——SIRIUS内部按化合物名自动续传，MSP变化不影响项目有效性）
 """
 
 import argparse
@@ -33,18 +34,9 @@ import shutil
 import sys
 
 
-def _get_msp_identity(msp_path: str) -> str:
-    """MSP 文件身份标识（路径 + 大小 + 修改时间）"""
-    if not msp_path or not os.path.exists(msp_path):
-        return f"nonexistent:{msp_path}"
-    stat = os.stat(msp_path)
-    return f"{os.path.abspath(msp_path)}:{stat.st_size}:{stat.st_mtime}"
-
-
 def _compute_hash(args) -> str:
-    """计算当前参数 SHA256 哈希"""
+    """计算当前参数 SHA256 哈希（仅处理规则，不含输入数据身份）"""
     params = {
-        'msp_identity': _get_msp_identity(args.sample_msp),
         'instrument': args.instrument,
         'ion_mode': args.ion_mode,
         'databases': sorted(args.databases),
@@ -91,10 +83,6 @@ def _check_mode(args):
             old_val = old_params.get(key, '<缺失>')
             new_val = params.get(key, '<缺失>')
             if str(old_val) != str(new_val):
-                if key == 'msp_identity':
-                    # 只显示变化要点
-                    print(f"  输入MSP已变化")
-                else:
                     print(f"  {key}: {old_val} → {new_val}")
 
     except Exception as e:
