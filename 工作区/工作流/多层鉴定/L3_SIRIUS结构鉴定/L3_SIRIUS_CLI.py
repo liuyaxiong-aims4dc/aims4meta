@@ -561,19 +561,40 @@ def process_results(output_dir: str) -> tuple:
     df_hit = df[df['smiles'].notna() & (df['smiles'] != '')].copy()
     n_hits = len(df_hit)
 
-    # 仅保留高置信度结果（ConfidenceScoreExact ≥ 0.64，COSMIC FDR ≤ 10%）
-    # 低/中置信度结果不输出，仅高置信度保留供操作者从多候选中选择
+    # 三级置信度策略：高置信全保留（多候选供选择），中/低仅保留最佳
+    # 高：≥0.64 全保留 | 中：0.32-0.64 仅最佳 | 低：<0.32/-Inf 仅最佳
     has_conf_col = 'ConfidenceScoreExact' in df_hit.columns
-    if has_conf_col:
-        def _is_high_confidence(val):
-            if val is None or (isinstance(val, float) and (pd.isna(val) or val == float('-inf'))):
-                return False
-            try:
-                return float(val) >= 0.64
-            except (ValueError, TypeError):
-                return False
-        high_mask = df_hit['ConfidenceScoreExact'].apply(_is_high_confidence)
-        df_output = df_hit[high_mask].copy()
+    has_rank_col = 'structurePerIdRank' in df_hit.columns
+    compound_col = 'mappingFeatureId' if 'mappingFeatureId' in df_hit.columns else (
+        'alignedFeatureId' if 'alignedFeatureId' in df_hit.columns else None)
+
+    def _safe_conf(val):
+        """安全的置信度数值提取，-Infinity/NaN 返回 -inf"""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return float('-inf')
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return float('-inf')
+
+    if has_conf_col and compound_col:
+        df_hit['_conf_num'] = df_hit['ConfidenceScoreExact'].apply(_safe_conf)
+        kept_rows = []
+        for _, group in df_hit.groupby(compound_col):
+            has_high = (group['_conf_num'] >= 0.64).any()
+            if has_high:
+                kept_rows.append(group[group['_conf_num'] >= 0.64])
+            else:
+                if has_rank_col:
+                    best = group[group['structurePerIdRank'] == group['structurePerIdRank'].min()].head(1)
+                else:
+                    best = group.loc[[group['_conf_num'].idxmax()]]
+                if len(best) > 0:
+                    kept_rows.append(best)
+        df_output = pd.concat(kept_rows, ignore_index=True) if kept_rows else pd.DataFrame(columns=df_hit.columns)
+        df_hit.drop(columns=['_conf_num'], inplace=True)
+        if '_conf_num' in df_output.columns:
+            df_output.drop(columns=['_conf_num'], inplace=True)
     else:
         df_output = df_hit
     n_output = len(df_output)
@@ -614,8 +635,23 @@ def process_results(output_dir: str) -> tuple:
         print(f"  L3结果(无结构): {l3_file} ({total_compounds} 条，仅分子式)")
         return total_compounds, 0
 
+    # 判断置信度等级（COSMIC论文 FDR 映射：≥0.64 → ~10%, ≥0.32 → ~20%）
+    def _classify_confidence(val):
+        if val is None or (isinstance(val, float) and (pd.isna(val) or val == float('-inf'))):
+            return '低置信度'
+        try:
+            v = float(val)
+        except (ValueError, TypeError):
+            return '低置信度'
+        if v >= 0.64:
+            return '高置信度'
+        elif v >= 0.32:
+            return '中置信度'
+        else:
+            return '低置信度'
+
     # 生成L3标准格式（统一列名，与L1/L2/L4一致）
-    # 注意：仅输出高置信度结果（≥0.64），低/中置信度已在过滤阶段排除
+    # 三级策略：高置信全保留（多候选），中/低仅保留各自最佳
     df_l4 = pd.DataFrame({
         'query_name': df_output['mappingFeatureId'] if 'mappingFeatureId' in df_output.columns else (
             df_output['alignedFeatureId'] if 'alignedFeatureId' in df_output.columns else df_output.index),
@@ -643,7 +679,8 @@ def process_results(output_dir: str) -> tuple:
         'zodiac_score': df_output['ZodiacScore'] if 'ZodiacScore' in df_output.columns else '',
         'sirius_score': df_output['SiriusScore'] if 'SiriusScore' in df_output.columns else '',
         'identification_source': 'L3_SIRIUS',
-        'structure_confidence': '高置信度'  # 已过滤，仅输出 ≥0.64
+        'structure_confidence': df_output['ConfidenceScoreExact'].apply(_classify_confidence)
+            if 'ConfidenceScoreExact' in df_output.columns else '低置信度'
     })
 
     l3_file = os.path.join(output_dir, 'L3_identified.csv')
