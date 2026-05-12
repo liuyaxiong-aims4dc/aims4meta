@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-L1-预处理: DreaMS 向量化工具
+DreaMS 向量化工具
 
 支持三种模式：
 1. 数据库模式（L1数据库）：通过 L1_DATABASES 环境变量传入数据库配置
@@ -486,7 +486,7 @@ def main():
                     print(f"  清除旧缓存: {Path(old_cache).name}")
 
             print("=" * 70)
-            print("L1-预处理: 多文件合并 + DreaMS 向量化")
+            print("向量化: 多文件合并 + DreaMS 向量化")
             print("=" * 70)
             print(f"  离子模式: {ion_mode}")
             print(f"  输入文件: {len(msp_files)} 个")
@@ -504,7 +504,7 @@ def main():
             # 判断是样品模式还是普通单文件模式
             mode_name = "样品" if OUTPUT_DIR else "单文件"
             print("=" * 70)
-            print(f"L1-预处理: {mode_name} DreaMS 向量化")
+            print(f"{mode_name} DreaMS 向量化")
             print("=" * 70)
             print(f"  输入文件: {target_msp}")
             if OUTPUT_DIR:
@@ -547,7 +547,7 @@ def main():
         return False
 
     print("=" * 70)
-    print("L1-预处理: L1数据库 DreaMS 向量化")
+    print("L1数据库 DreaMS 向量化")
     print("=" * 70)
     print(f"  离子模式: {ION_MODE}")
     print(f"  数据库: {', '.join(db_config.keys())}")
