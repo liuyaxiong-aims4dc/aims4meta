@@ -570,6 +570,7 @@ def format_excel_output(df: pd.DataFrame, output_path: str,
         worksheet = writer.sheets[sheet_name]
         
         # 1. 设置列宽
+        wide_columns = {'鉴定碎片详情', 'matched_fragments'}  # 内容较长的列放宽上限
         for idx, col in enumerate(df.columns, 1):
             max_length = len(str(col))
             sample_data = df[col].astype(str).head(100)
@@ -577,7 +578,10 @@ def format_excel_output(df: pd.DataFrame, output_path: str,
                 val_len = len(str(val))
                 if val_len > max_length:
                     max_length = val_len
-            adjusted_width = min(max_length + 2, 50)
+            cap = 80 if col in wide_columns else 50
+            min_width = 40 if col in wide_columns else 0
+            adjusted_width = min(max_length + 2, cap)
+            adjusted_width = max(adjusted_width, min_width)
             worksheet.column_dimensions[get_column_letter(idx)].width = adjusted_width
         
         # 2. 冻结首行
