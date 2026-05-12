@@ -245,8 +245,8 @@ def calculate_isotope_similarity_for_df(df: pd.DataFrame) -> pd.DataFrame:
         return df
     
     if not actual_dist_col:
-        # 鉴定结果CSV通常不含同位素分布列（该列在QI原始CSV中），此处仅INFO
-        print(f"[INFO] 未找到同位素分布列，同位素相似度设为0")
+        # 各层独立排序时尚未执行CSV关联，同位素分布列天然缺失
+        # 最终汇总阶段会统一重新计算，此处静默跳过
         df['isotope_similarity'] = 0.0
         return df
     
