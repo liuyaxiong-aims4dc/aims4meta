@@ -24,7 +24,7 @@ from datetime import datetime
 import pandas as pd
 
 # SIRIUS配置
-DEFAULT_SIRIUS_BIN = "/stor3/AIMS4Meta/源代码/SIRIUS/sirius-6.3.4-linux-x64/sirius/bin/sirius"
+DEFAULT_SIRIUS_BIN = "/stor3/AIMS4Meta/源代码/SIRIUS/sirius-6.3.5-linux-x64/sirius/bin/sirius"
 SIRIUS_USERNAME = os.environ.get('L3_SIRIUS_USERNAME', "fanhl@whut.edu.cn")
 SIRIUS_PASSWORD = os.environ.get('L3_SIRIUS_PASSWORD', "Kongtong@518936")
 
@@ -581,7 +581,7 @@ def process_results(output_dir: str) -> tuple:
             'matched_ontology': '',
             'source_method': 'SIRIUS',
             'source_database': 'CSI:FingerID',
-            'rank': 1,
+            'rank': 1,  # 无结构时无多候选
             'isotope_similarity': '',
             'comprehensive_score': '',
             'csi_score': '',
@@ -596,6 +596,22 @@ def process_results(output_dir: str) -> tuple:
         df_l4.to_csv(l3_file, index=False, encoding='utf-8')
         print(f"  L3结果(无结构): {l3_file} ({total_compounds} 条，仅分子式)")
         return total_compounds, 0
+
+    # 判断置信度等级（COSMIC论文 FDR 映射：≥0.64 FDR~10%, ≥0.32 FDR~20%）
+    def _classify_confidence(val):
+        # 排除 -Infinity / NaN / None
+        if val is None or (isinstance(val, float) and (pd.isna(val) or val == float('-inf'))):
+            return '低置信度'
+        try:
+            v = float(val)
+        except (ValueError, TypeError):
+            return '低置信度'
+        if v >= 0.64:
+            return '高置信度'
+        elif v >= 0.32:
+            return '中置信度'
+        else:
+            return '低置信度'
 
     # 生成L3标准格式（统一列名，与L1/L2/L4一致）
     df_l4 = pd.DataFrame({
@@ -615,9 +631,9 @@ def process_results(output_dir: str) -> tuple:
         'matched_ontology': '',  # L3无Ontology分类
         'source_method': 'SIRIUS',
         'source_database': 'CSI:FingerID',
-        'rank': 1,  # L3每个化合物只有1个结果
+        'rank': df_hit['structurePerIdRank'] if 'structurePerIdRank' in df_hit.columns else 1,
         'isotope_similarity': '',  # L3无同位素相似度
-        'comprehensive_score': df_hit['ConfidenceScoreApproximate'] if 'ConfidenceScoreApproximate' in df_hit.columns else '',
+        'comprehensive_score': df_hit['ConfidenceScoreExact'] if 'ConfidenceScoreExact' in df_hit.columns else '',
         # L3特有列
         'csi_score': df_hit['CSI:FingerIDScore'] if 'CSI:FingerIDScore' in df_hit.columns else '',
         'confidence_exact': df_hit['ConfidenceScoreExact'] if 'ConfidenceScoreExact' in df_hit.columns else '',
@@ -625,9 +641,8 @@ def process_results(output_dir: str) -> tuple:
         'zodiac_score': df_hit['ZodiacScore'] if 'ZodiacScore' in df_hit.columns else '',
         'sirius_score': df_hit['SiriusScore'] if 'SiriusScore' in df_hit.columns else '',
         'identification_source': 'L3_SIRIUS',
-        'structure_confidence': df_hit['ConfidenceScoreApproximate'].apply(
-            lambda x: '高置信度' if pd.notna(x) and x >= 0.7 else ('中置信度' if pd.notna(x) and x >= 0.3 else '低置信度')
-        ) if 'ConfidenceScoreApproximate' in df_hit.columns else '低置信度'
+        'structure_confidence': df_hit['ConfidenceScoreExact'].apply(_classify_confidence)
+            if 'ConfidenceScoreExact' in df_hit.columns else '低置信度'
     })
 
     l3_file = os.path.join(output_dir, 'L3_identified.csv')
