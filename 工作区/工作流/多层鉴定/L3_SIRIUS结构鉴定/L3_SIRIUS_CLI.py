@@ -561,6 +561,23 @@ def process_results(output_dir: str) -> tuple:
     df_hit = df[df['smiles'].notna() & (df['smiles'] != '')].copy()
     n_hits = len(df_hit)
 
+    # 仅保留高置信度结果（ConfidenceScoreExact ≥ 0.64，COSMIC FDR ≤ 10%）
+    # 低/中置信度结果不输出，仅高置信度保留供操作者从多候选中选择
+    has_conf_col = 'ConfidenceScoreExact' in df_hit.columns
+    if has_conf_col:
+        def _is_high_confidence(val):
+            if val is None or (isinstance(val, float) and (pd.isna(val) or val == float('-inf'))):
+                return False
+            try:
+                return float(val) >= 0.64
+            except (ValueError, TypeError):
+                return False
+        high_mask = df_hit['ConfidenceScoreExact'].apply(_is_high_confidence)
+        df_output = df_hit[high_mask].copy()
+    else:
+        df_output = df_hit
+    n_output = len(df_output)
+
     if n_hits == 0:
         print("  警告: 结构鉴定结果中无有效SMILES，可能Zodiac/CSI:FingerID在线服务未成功")
         # 仍输出L3文件（仅有分子式和评分，无结构）- 统一列名格式
@@ -597,57 +614,41 @@ def process_results(output_dir: str) -> tuple:
         print(f"  L3结果(无结构): {l3_file} ({total_compounds} 条，仅分子式)")
         return total_compounds, 0
 
-    # 判断置信度等级（COSMIC论文 FDR 映射：≥0.64 FDR~10%, ≥0.32 FDR~20%）
-    def _classify_confidence(val):
-        # 排除 -Infinity / NaN / None
-        if val is None or (isinstance(val, float) and (pd.isna(val) or val == float('-inf'))):
-            return '低置信度'
-        try:
-            v = float(val)
-        except (ValueError, TypeError):
-            return '低置信度'
-        if v >= 0.64:
-            return '高置信度'
-        elif v >= 0.32:
-            return '中置信度'
-        else:
-            return '低置信度'
-
     # 生成L3标准格式（统一列名，与L1/L2/L4一致）
+    # 注意：仅输出高置信度结果（≥0.64），低/中置信度已在过滤阶段排除
     df_l4 = pd.DataFrame({
-        'query_name': df_hit['mappingFeatureId'] if 'mappingFeatureId' in df_hit.columns else (
-            df_hit['alignedFeatureId'] if 'alignedFeatureId' in df_hit.columns else df_hit.index),
-        'matched_name': df_hit['name'] if 'name' in df_hit.columns else '',
-        'matched_smiles': df_hit['smiles'],
-        'matched_inchikey': df_hit['InChIkey2D'] if 'InChIkey2D' in df_hit.columns else '',
-        'matched_formula': df_hit['molecularFormula'] if 'molecularFormula' in df_hit.columns else '',
+        'query_name': df_output['mappingFeatureId'] if 'mappingFeatureId' in df_output.columns else (
+            df_output['alignedFeatureId'] if 'alignedFeatureId' in df_output.columns else df_output.index),
+        'matched_name': df_output['name'] if 'name' in df_output.columns else '',
+        'matched_smiles': df_output['smiles'],
+        'matched_inchikey': df_output['InChIkey2D'] if 'InChIkey2D' in df_output.columns else '',
+        'matched_formula': df_output['molecularFormula'] if 'molecularFormula' in df_output.columns else '',
         'cosine_score': '',  # L3无余弦相似度
         'matched_peaks_ratio': '',  # L3无碎片匹配比例
         'matched_fragments': '',  # L3无碎片详情
-        'precursor_mz': df_hit['ionMass'] if 'ionMass' in df_hit.columns else '',
+        'precursor_mz': df_output['ionMass'] if 'ionMass' in df_output.columns else '',
         'library_precursor_mz': '',  # L3无库母离子
         'precursor_ppm_diff': '',  # L3无质量偏差
-        'adduct': df_hit['adduct'] if 'adduct' in df_hit.columns else '',
+        'adduct': df_output['adduct'] if 'adduct' in df_output.columns else '',
         'matched_ontology': '',  # L3无Ontology分类
         'source_method': 'SIRIUS',
         'source_database': 'CSI:FingerID',
-        'rank': df_hit['structurePerIdRank'] if 'structurePerIdRank' in df_hit.columns else 1,
+        'rank': df_output['structurePerIdRank'] if 'structurePerIdRank' in df_output.columns else 1,
         'isotope_similarity': '',  # L3无同位素相似度
-        'comprehensive_score': df_hit['ConfidenceScoreExact'] if 'ConfidenceScoreExact' in df_hit.columns else '',
+        'comprehensive_score': df_output['ConfidenceScoreExact'] if 'ConfidenceScoreExact' in df_output.columns else '',
         # L3特有列
-        'csi_score': df_hit['CSI:FingerIDScore'] if 'CSI:FingerIDScore' in df_hit.columns else '',
-        'confidence_exact': df_hit['ConfidenceScoreExact'] if 'ConfidenceScoreExact' in df_hit.columns else '',
-        'confidence_approx': df_hit['ConfidenceScoreApproximate'] if 'ConfidenceScoreApproximate' in df_hit.columns else '',
-        'zodiac_score': df_hit['ZodiacScore'] if 'ZodiacScore' in df_hit.columns else '',
-        'sirius_score': df_hit['SiriusScore'] if 'SiriusScore' in df_hit.columns else '',
+        'csi_score': df_output['CSI:FingerIDScore'] if 'CSI:FingerIDScore' in df_output.columns else '',
+        'confidence_exact': df_output['ConfidenceScoreExact'] if 'ConfidenceScoreExact' in df_output.columns else '',
+        'confidence_approx': df_output['ConfidenceScoreApproximate'] if 'ConfidenceScoreApproximate' in df_output.columns else '',
+        'zodiac_score': df_output['ZodiacScore'] if 'ZodiacScore' in df_output.columns else '',
+        'sirius_score': df_output['SiriusScore'] if 'SiriusScore' in df_output.columns else '',
         'identification_source': 'L3_SIRIUS',
-        'structure_confidence': df_hit['ConfidenceScoreExact'].apply(_classify_confidence)
-            if 'ConfidenceScoreExact' in df_hit.columns else '低置信度'
+        'structure_confidence': '高置信度'  # 已过滤，仅输出 ≥0.64
     })
 
     l3_file = os.path.join(output_dir, 'L3_identified.csv')
     df_l4.to_csv(l3_file, index=False, encoding='utf-8')
-    print(f"  L3结果: {l3_file} ({n_hits} 条)")
+    print(f"  L3结果(高置信度): {l3_file} ({n_output} 条，总结构命中 {n_hits}，过滤后 {n_output})")
 
     return total_compounds, n_hits
 
