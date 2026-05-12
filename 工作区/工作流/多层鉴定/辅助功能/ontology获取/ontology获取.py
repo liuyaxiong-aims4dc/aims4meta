@@ -433,7 +433,7 @@ def process_csv(input_csv: str, output_csv: str, classification_field: str = "cl
 
     fail_count = needs_query.sum() - cache_filled
     if fail_count > 0:
-        logger.warning(f"未命中: {fail_count} 条（需运行 L3 SIRIUS CANOPUS 获取分类）")
+        logger.warning(f"未命中: {fail_count} 条（CANOPUS 缓存无记录，可能来自L1/L2鉴定且未进入L3流程）")
 
     df.to_csv(output_csv, index=False, encoding='utf-8')
     logger.info(f"处理完成: CANOPUS={canopus_filled}, 缓存命中={cache_filled}, 未命中={fail_count}")
