@@ -39,8 +39,8 @@ L1_DreaMS向量化 → L1_matchMS鉴定 → L1_DreaMS鉴定 → L1_整合 → L2
 # ----- 层级运行开关（Y=启用 / N=禁用） -----
 RUN_L1 = "Y"          # 是否运行L1实验数据库鉴定
 RUN_L2 = "Y"          # 是否运行L2模拟数据库鉴定
-RUN_L3 = "N"          # 是否运行L3 SIRIUS结构鉴定
-RUN_L4 = "N"          # 是否运行L4 DreaMS分子网络
+RUN_L3 = "Y"          # 是否运行L3 SIRIUS结构鉴定
+RUN_L4 = "Y"          # 是否运行L4 DreaMS分子网络
 
 # ----- L1 数据库开关 -----
 L1_USE_MSDIAL = "Y"          # 使用MSDIAL通用实验库
@@ -56,13 +56,13 @@ L2_USE_PFAS = "N"             # 覆盖 PFAS_* 所有条目
 # SIRIUS custom-db本地指纹库（.siriusdb），无需联网即可结构搜索
 # 数据库名必须与SIRIUS注册名一致（custom-db show可查看）
 # 路径：/stor3/AIMS4Meta/数据库/模拟数据库/sirius/
-L3_USE_TCM = "N"              # tcmbank_herb本地库（中药+草药，~68万结构，139MB）
+L3_USE_TCM = "Y"              # tcmbank_herb本地库（中药+草药，~68万结构，139MB）
 L3_USE_COCONUT = "N"          # coconut_0425本地库（天然产物，超大规模~5000万结构，8.1GB，搜库极慢）
-L3_USE_DRUGBANK = "N"         # drugbank本地库（药物分子，~13万结构，33MB）
-L3_USE_FDA = "N"              # fda_approved本地库（FDA批准药物，~3.4万结构，8MB）
+L3_USE_DRUGBANK = "Y"         # drugbank本地库（药物分子，~13万结构，33MB）
+L3_USE_FDA = "Y"              # fda_approved本地库（FDA批准药物，~3.4万结构，8MB）
 L3_USE_PFAS = "N"             # pfas本地库（PFAS化合物，~5.7万结构，11MB）
 L3_USE_MYCOTOXIN = "N"        # mycotoxin本地库（真菌毒素，~1千结构，264KB）
-L3_USE_PUBLIC_SPECTRA = "Y"   # public_spectra_2506本地库（公共实验谱图，~1700万结构，2.7GB）
+L3_USE_PUBLIC_SPECTRA = "N"   # public_spectra_2506本地库（公共实验谱图，~1700万结构，2.7GB）
 
 # ----- L3 在线数据库配置 -----
 # SIRIUS内置在线结构数据库（需联网+账号认证）
@@ -171,7 +171,7 @@ L3_LOCAL_DATABASES = {
 
 # ----- 鉴定参数 -----
 L3_SIRIUS_INSTRUMENT = "qtof"  # orbitrap 或 qtof
-L3_MIN_PEAKS = 5             # 最小碎片峰数量（默认：5）
+L3_MIN_PEAKS = 6             # 最小碎片峰数量（默认：6）
 L3_MAX_MZ = 1500             # 最大m/z值（默认：1500）
 L3_MIN_INTENSITY = 500       # 信号强度阈值：配套CSV 的 Maximum Abundance 低于该值则跳过（0 停用）
                              # HDMSE 开淌度后信号较低，默认500（例大黄样品约保留 20-25%化合物）。根据实际丰度分布调整
@@ -1184,30 +1184,6 @@ def main():
             ontology_args += ["--sirius_results_dir", l3_sirius_results_dir]
             logger.info(f"[Ontology] 检测到 L3 CANOPUS 输出目录，将优先从 TSV 填充 ontology：{l3_sirius_results_dir}")
         run_script(ontology_script, ontology_args, "dreams")
-
-        # 2.5 L3 高置信度结果反向注入 L1 自建累积库
-        #   阈值基于 Hoffmann et al. Nat Biotech 2022 (COSMIC) FDR ~10% -> confidence_exact >= 0.64
-        #   累积库落盘: /stor3/AIMS4Meta/数据库/实验数据库/L3_auto_library/L3_auto_library_{POS|NEG}.msp
-        try:
-            l3_identified_csv = os.path.join(args.output_dir, "L3_results", "L3_identified.csv")
-            l3_processed_msp = os.path.join(args.output_dir, "L3_results", "L3_processed.msp")
-            if os.path.exists(l3_identified_csv) and os.path.exists(l3_processed_msp):
-                inject_script = os.path.join(os.path.dirname(__file__), "辅助功能", "L3反向注入L1库", "inject_l3_to_l1.py")
-                sample_name_for_lib = getattr(args, 'sample_name', None) \
-                    or (os.path.splitext(os.path.basename(getattr(args, 'sample', '')))[0] if getattr(args, 'sample', None) else '') \
-                    or os.path.basename(os.path.normpath(args.output_dir)).replace('_多层鉴定结果', '')
-                inject_args = [
-                    "--l3_identified_csv", l3_identified_csv,
-                    "--l3_processed_msp", l3_processed_msp,
-                    "--sample_name", sample_name_for_lib,
-                    "--ion_mode", args.ion_mode,
-                ]
-                logger.info(f"[L3->L1注入] 开始反向注入高置信度结构鉴定结果到自建累积库（样品: {sample_name_for_lib}）")
-                run_script(inject_script, inject_args, "dreams")
-            else:
-                logger.info("[L3->L1注入] 未检测到 L3_identified.csv 或 L3_processed.msp，跳过")
-        except Exception as e:
-            logger.warning(f"[L3->L1注入] 执行异常（不影响主流程）: {e}")
 
         # 3. CCS预测
         ccsbase2_script = os.path.join(os.path.dirname(__file__), "辅助功能", "CCS预测", "ccsbase2预测.py")
