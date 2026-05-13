@@ -45,73 +45,30 @@ cache_lock = threading.Lock()  # 缓存锁
 
 def call_niu_api_batch(texts, max_retries=3):
     """
-    批量调用小牛翻译API (一次最多50条)
+    逐条调用小牛翻译 API（POST，domain=chemistry），替代旧的 GET 批量接口。
 
-    参数:
-        texts: 待翻译文本列表
-        max_retries: 最大重试次数
-
-    返回:
-        翻译结果列表 (与输入顺序对应)
+    旧的 GET 批量接口用 \\n 拼接/拆分文本，当化合物名超长或含特殊字符时
+    会产生输出错位（A 的翻译被记到 B 名下），导致缓存大面积污染。
+    逐条 POST 保证输入输出严格一一对应，外层 ThreadPoolExecutor 提供并发。
     """
     if not texts:
         return []
 
-    # 小牛API批量翻译限制: 最多50条
-    batch_size = 50
-    all_results = []
-
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i+batch_size]
-
+    results = []
+    for text in texts:
         for retry in range(max_retries):
             try:
-                # 用换行符连接多条文本
-                combined_text = '\n'.join(batch)
-
-                params = {
-                    'from': 'en',
-                    'to': 'zh',
-                    'apikey': NIU_API_KEY,
-                    'src_text': combined_text
-                }
-
-                response = requests.get(NIU_API_URL, params=params, timeout=30)
-
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('tgt_text'):
-                        # 按换行符分割结果
-                        translations = result['tgt_text'].split('\n')
-
-                        # 确保结果数量鉴定
-                        if len(translations) == len(batch):
-                            all_results.extend(translations)
-                            break
-                        else:
-                            # 数量不鉴定,回退到逐条翻译
-                            for text in batch:
-                                all_results.append(call_niu_api(text))
-                            break
-                else:
-                    if retry < max_retries - 1:
-                        time.sleep(1)
-                        continue
-                    # 重试失败,返回原文
-                    all_results.extend(batch)
-
-            except Exception as e:
+                translation = call_niu_api(text)
+                results.append(translation)
+                break
+            except Exception:
                 if retry < max_retries - 1:
                     time.sleep(1)
-                    continue
-                # 异常,返回原文
-                all_results.extend(batch)
-
-        # 批次间短暂休眠,避免API限流
-        if i + batch_size < len(texts):
-            time.sleep(0.1)
-
-    return all_results
+                else:
+                    results.append(text)  # 失败返回原文
+        # 逐条间短暂休眠，避免限流
+        time.sleep(0.05)
+    return results
 
 
 def translate_batch_threaded(items, cache_file, max_workers=5):
