@@ -917,6 +917,10 @@ def process_final_results(output_dir: str, l1_csv: str, l2_csv: str, l3_csv: str
         cols.insert(rank_idx + 1, 'identification_level')
         final_df = final_df[cols]
 
+    # 加合物类型去空格（SIRIUS 输出 "[M + H]+" → 统一 "[M+H]+"）
+    if 'adduct' in final_df.columns:
+        final_df['adduct'] = final_df['adduct'].astype(str).str.replace(' ', '', regex=False)
+
     final_df.to_csv(output_csv, index=False, encoding='utf-8')
 
     # 同一 query_name 多候选时合并共享列（样品化合物、CCS 等只显示一次）

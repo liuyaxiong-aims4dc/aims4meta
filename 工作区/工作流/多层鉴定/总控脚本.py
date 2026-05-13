@@ -1187,11 +1187,6 @@ def main():
                 if col in df.columns:
                     df = df.drop(columns=[col], errors='ignore')
             
-            # d) 加合物类型去空格（SIRIUS 输出 "[M + H]+"，统一为 "[M+H]+"）
-            for col in ['adduct', '加合物类型']:
-                if col in df.columns:
-                    df[col] = df[col].astype(str).str.replace(' ', '', regex=False)
-            
             rename_map = get_column_rename_map('final')
             rename_map.update(get_column_rename_map('L2'))
             df_cn = df.rename(columns=rename_map)
