@@ -207,19 +207,83 @@ def is_chinese(text):
 
 
 def has_chinese_translation(text):
-    """判断文本是否已有中文翻译（原文是中文 或 已有 'English (中文)' 格式）"""
+    """判断文本是否已有中文翻译（原文是中文 或 已有 'English (中文)' 格式）
+
+    注意：返回 False 不代表没有中文——可能是混合文本（英文前缀+中文后缀），
+    此时虽然整体含中文，但英文前缀仍需翻译。调用方需进一步用 is_partial_translation() 判断。
+    """
     if not text or not isinstance(text, str):
         return False
     text = text.strip()
-    # 情况1: 原文本身包含中文
+    # 情况1: 原文本身包含中文 → 可能是 "纯中文" 或 "混合中英文"
     if is_chinese(text):
+        # 如果英文占比大但含中文，不算"已有翻译"，需要进一步处理
+        if is_partial_translation(text):
+            return False
         return True
     # 情况2: 已有翻译格式 "English (中文)"
     # 检查是否以中文括号结尾
     match = re.search(r'\([^)]*[\u4e00-\u9fff][^)]*\)\s*$', text)
     if match:
-        return True
+        # 确保括号外没有未翻译的英文（排除纯数字/符号）
+        prefix = text[:match.start()].strip()
+        if not re.search(r'[a-zA-Z]{3,}', prefix):
+            return True
     return False
+
+
+def is_partial_translation(text):
+    """检测是否为部分翻译：英文前缀 + 中文括号后缀
+
+    例如: kaempferol-3-O-... ((2S)-1-[...]哌嗪-2-甲酰胺)
+    英文主体未译，但后缀括号内已是中文。
+    """
+    if not text or not isinstance(text, str):
+        return False
+    text = text.strip()
+    if not is_chinese(text):
+        return False
+    # 必须有显著的英文部分（连续3个以上字母，排除H/C/N/O/P等单原子字符）
+    if not re.search(r'[a-zA-Z]{3,}', text):
+        return False
+    return True
+
+
+def split_partial_translation(text):
+    """拆分混合文本：返回 (english_prefix, chinese_suffix)
+
+    规则：
+    1. 找到最后一个包含中文的括号组作为中文后缀的起点
+    2. 之前的部分判定为英文前缀
+    3. 如果英文前缀太短或无实质内容，返回 (None, None)
+    """
+    if not text:
+        return None, None
+    text = text.strip()
+    # 找最后一个包含中文的括号组
+    matches = list(re.finditer(r'\([^()]*[\u4e00-\u9fff][^()]*\)', text))
+    if not matches:
+        # 没有括号包裹的中文，尝试按第一个中文字符切分
+        m = re.search(r'[\u4e00-\u9fff]', text)
+        if m:
+            prefix = text[:m.start()].strip()
+            suffix = text[m.start():].strip()
+            if prefix and re.search(r'[a-zA-Z]{3,}', prefix):
+                return prefix, suffix
+        return None, None
+
+    last_match = matches[-1]
+    # 检查该括号组前是否有英文（可能含括号的化学名）
+    prefix = text[:last_match.start()].strip()
+    suffix = text[last_match.start():].strip()
+    if not prefix:
+        return None, None
+    if not re.search(r'[a-zA-Z]{3,}', prefix):
+        return None, None
+    # 检查前缀末尾是否是中文括号的配对前括号
+    # 例如: kaempferol-3-O-((3'',4''-...)) (中文)
+    # 需要把成对的英文括号也归入前缀
+    return prefix, suffix
 
 
 def call_niu_api(text, from_lang="en", to_lang="zh"):
@@ -319,9 +383,10 @@ def translate_csv_file(csv_path, name_column, output_path=None, cache_file=None)
     total_success = 0
     
     for col in columns_to_translate:
-        # 收集需要翻译的条目（纯英文且无中文翻译）
+        # 收集需要翻译的条目（纯英文 或 英文前缀+中文后缀的混合体）
         items_to_translate = []
         indices_to_translate = []
+        partial_info = {}  # {idx: (english_prefix, chinese_suffix)}  部分翻译信息
         for idx in range(len(df)):
             val = df.at[idx, col]
             if pd.isna(val):
@@ -329,9 +394,18 @@ def translate_csv_file(csv_path, name_column, output_path=None, cache_file=None)
             val_str = str(val).strip()
             if not val_str or val_str == 'nan' or val_str == 'N/A':
                 continue
-            # 检查是否已有中文翻译
+            # 检查是否已有完整中文翻译
             if has_chinese_translation(val_str):
                 continue
+            # 检查是否为部分翻译（英文前缀+中文后缀）
+            if is_partial_translation(val_str):
+                prefix, suffix = split_partial_translation(val_str)
+                if prefix and suffix:
+                    items_to_translate.append(prefix)  # 只翻译英文前缀
+                    indices_to_translate.append(idx)
+                    partial_info[idx] = (prefix, suffix)
+                    continue
+            # 纯英文，全量翻译
             items_to_translate.append(val_str)
             indices_to_translate.append(idx)
         
@@ -346,13 +420,21 @@ def translate_csv_file(csv_path, name_column, output_path=None, cache_file=None)
         translations = translate_batch_threaded(items, cache_file, max_workers=5)
 
         # 更新DataFrame
-        for idx, val in zip(indices_to_translate, items_to_translate):
-            cn_val = translations.get(idx, val)
-            if cn_val and cn_val != val and is_chinese(cn_val):
+        for idx, original_val in zip(indices_to_translate, items_to_translate):
+            cn_val = translations.get(idx, original_val)
+            if cn_val and cn_val != original_val and is_chinese(cn_val):
                 # 统一: 在原列替换为 "English (中文)" 格式
-                new_val = f"{val} ({cn_val})"
+                if idx in partial_info:
+                    # 部分翻译：英文前缀 → "English (中文)"，再拼回中文后缀
+                    english_prefix, chinese_suffix = partial_info[idx]
+                    new_val = f"{english_prefix} ({cn_val}) {chinese_suffix}"
+                else:
+                    new_val = f"{original_val} ({cn_val})"
                 df.at[idx, col] = new_val
                 total_success += 1
+            elif idx in partial_info and cn_val == original_val:
+                # API 对英文前缀翻译失败（返回原文），保留混合原文
+                pass
             total_translated += 1
 
         print(f"  [{col}] 完成: {total_translated} 条, 成功 {total_success} 条")
