@@ -23,7 +23,7 @@ L3 SIRIUS 参数续传校验辅助脚本
 
 追踪的参数：ion_mode、instrument、databases、mz_threshold、
 min_peaks、min_intensity、sample_csv、加合物类型、formula候选数
-（注意：不含MSP身份——SIRIUS内部按化合物名自动续传，MSP变化不影响项目有效性）
+（含MSP身份——MSP变化时触发项目重置，避免跨输入累积膨胀）
 """
 
 import argparse
@@ -35,7 +35,7 @@ import sys
 
 
 def _compute_hash(args) -> str:
-    """计算当前参数 SHA256 哈希（仅处理规则，不含输入数据身份）"""
+    """计算当前参数 SHA256 哈希（含输入 MSP 身份，MSP 变化则触发重置）"""
     params = {
         'instrument': args.instrument,
         'ion_mode': args.ion_mode,
@@ -44,11 +44,43 @@ def _compute_hash(args) -> str:
         'min_peaks': args.min_peaks,
         'min_intensity': args.min_intensity,
         'sample_csv': args.sample_csv or '',
+        'sample_msp': args.sample_msp,
         'enforced_adduct': '[M+H]+,[M+Na]+' if args.ion_mode == 'POS' else '[M-H]-',
         'formula_candidates': 10,
     }
     params_str = json.dumps(params, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(params_str.encode('utf-8')).hexdigest(), params
+
+
+def _save_params_to_file(params_file: str, params_hash: str, params: dict):
+    """将参数哈希写入文件（check 模式自动补录时复用）"""
+    os.makedirs(os.path.dirname(params_file), exist_ok=True)
+    with open(params_file, 'w', encoding='utf-8') as f:
+        json.dump({'params_hash': params_hash, 'params': params}, f,
+                  ensure_ascii=False, indent=2)
+
+
+def _remove_project(project_path: str):
+    """安全删除 SIRIUS 项目（兼容文件/目录两种格式）"""
+    if os.path.isdir(project_path):
+        shutil.rmtree(project_path)
+    elif os.path.isfile(project_path):
+        os.remove(project_path)
+
+
+def _get_project_size_mb(project_path: str) -> float:
+    """获取项目大小（MB），兼容文件/目录"""
+    if os.path.isfile(project_path):
+        return os.path.getsize(project_path) / (1024 * 1024)
+    total = 0
+    for dirpath, _, filenames in os.walk(project_path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total / (1024 * 1024)
 
 
 def _check_mode(args):
@@ -62,8 +94,10 @@ def _check_mode(args):
         return
 
     if not os.path.exists(params_file):
-        print("[L3参数校验] 未找到参数文件（可能为旧版运行结果），删除旧项目确保准确")
-        shutil.rmtree(sirius_project)
+        # 参数文件丢失但项目存在 → 自动补录参数、保留项目
+        # （总控脚本 clean_level_dir 会清理 params_file，此处容错恢复）
+        print(f"[L3参数校验] 参数文件缺失，自动补录并保留现有项目（{_get_project_size_mb(sirius_project):.1f} MB）")
+        _save_params_to_file(params_file, params_hash, params)
         return
 
     try:
@@ -73,7 +107,7 @@ def _check_mode(args):
         old_params = old_data.get('params', {})
 
         if old_hash == params_hash:
-            size_mb = os.path.getsize(sirius_project) / (1024 * 1024)
+            size_mb = _get_project_size_mb(sirius_project)
             print(f"[L3参数校验] ✓ 参数未变化，续传（{size_mb:.1f} MB）")
             return
 
@@ -91,7 +125,7 @@ def _check_mode(args):
     if os.path.exists(params_file):
         os.remove(params_file)
     if os.path.exists(sirius_project):
-        shutil.rmtree(sirius_project)
+        _remove_project(sirius_project)
     print("[L3参数校验] 已清理旧项目，将从头计算")
 
 
@@ -101,10 +135,7 @@ def _save_mode(args):
     params_file = os.path.join(args.output_dir, 'sirius_params.json')
 
     try:
-        os.makedirs(args.output_dir, exist_ok=True)
-        with open(params_file, 'w', encoding='utf-8') as f:
-            json.dump({'params_hash': params_hash, 'params': params}, f,
-                      ensure_ascii=False, indent=2)
+        _save_params_to_file(params_file, params_hash, params)
         print(f"[L3参数校验] 参数已保存: {params_file}")
     except Exception as e:
         print(f"[L3参数校验] 警告: 无法保存参数文件: {e}", file=sys.stderr)

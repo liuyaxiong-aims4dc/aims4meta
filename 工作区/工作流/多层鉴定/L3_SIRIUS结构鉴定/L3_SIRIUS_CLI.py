@@ -426,12 +426,17 @@ def _run_sirius_step(cmd: list, step_name: str) -> bool:
 
     try:
         global _sirius_process
+        env = os.environ.copy()
+        # JDK 25 默认用 posix_spawn 替代 fork，某些环境下 AOT 编译子进程会报 EACCES
+        # 回退到传统 fork 机制消除 "权限不够" 警告（不影响功能，仅去噪）
+        env['SIRIUS_OPTS'] = env.get('SIRIUS_OPTS', '') + ' -Djdk.lang.Process.launchMechanism=FORK'
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=env
         )
         _sirius_process = process
 

@@ -38,7 +38,7 @@ L1_DreaMS向量化 → L1_matchMS鉴定 → L1_DreaMS鉴定 → L1_整合 → L2
 
 # ----- 层级运行开关（Y=启用 / N=禁用） -----
 RUN_L1 = "Y"          # 是否运行L1实验数据库鉴定
-RUN_L2 = "Y"          # 是否运行L2模拟数据库鉴定
+RUN_L2 = "N"          # 是否运行L2模拟数据库鉴定
 RUN_L3 = "Y"          # 是否运行L3 SIRIUS结构鉴定
 RUN_L4 = "Y"          # 是否运行L4 DreaMS分子网络
 
@@ -47,8 +47,8 @@ L1_USE_MSDIAL = "Y"          # 使用MSDIAL通用实验库
 L1_USE_SPECTRAVERSE = "Y"    # 使用SpectraVerse通用实验库
 
 # ----- L2 数据库开关（大类前缀匹配：开关名对应字典键前缀） -----
-L2_USE_TCM = "Y"              # 覆盖 TCM_* 所有条目（如 TCM_FIORA、TCM_CFMID）
-L2_USE_DRUG = "Y"             # 覆盖 DRUG_* 所有条目（DrugBank、FDA等）
+L2_USE_TCM = "N"              # 覆盖 TCM_* 所有条目（如 TCM_FIORA、TCM_CFMID）
+L2_USE_DRUG = "N"             # 覆盖 DRUG_* 所有条目（DrugBank、FDA等）
 L2_USE_LIPID = "N"            # 覆盖 LIPID 条目
 L2_USE_PFAS = "N"             # 覆盖 PFAS_* 所有条目
 
@@ -694,7 +694,8 @@ def main():
             if item == 'embeddings.npz':
                 continue
             # 保留谱图缓存（sirius_project内部结构复杂，且不含旧格式残留）
-            if item.startswith('sirius_project'):
+            # 同时保留参数文件以支持续传校验（MSP变化时正确触发重置）
+            if item.startswith('sirius_project') or item == 'sirius_params.json':
                 continue
             try:
                 if os.path.isdir(item_path):
