@@ -28,7 +28,9 @@ def predict_ccsbase2(input_csv, output_csv):
         smiles = str(row[smiles_col]) if pd.notna(row.get(smiles_col)) else ""
         adduct = str(row[adduct_col]) if adduct_col and pd.notna(row.get(adduct_col)) else "[M+H]+"
         if smiles and smiles.strip() and smiles != 'nan':
-            row_info.append((idx, smiles.strip(), adduct.strip()))
+            # 归一化加合物格式：去除空格（SIRIUS 输出 "[M + H]+" → CCSBase 需要 "[M+H]+"）
+            adduct_clean = adduct.strip().replace(' ', '')
+            row_info.append((idx, smiles.strip(), adduct_clean))
 
     if not row_info:
         print("[INFO] 无有效SMILES，跳过CCS预测")
