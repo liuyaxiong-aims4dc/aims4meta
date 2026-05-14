@@ -37,14 +37,14 @@ L1_DreaMS向量化 → L1_matchMS鉴定 → L1_DreaMS鉴定 → L1_整合 → L2
 # ============================================================
 
 # ----- 层级运行开关（Y=启用 / N=禁用） -----
-RUN_L1 = "Y"          # 是否运行L1实验数据库鉴定
+RUN_L1 = "N"          # 是否运行L1实验数据库鉴定
 RUN_L2 = "N"          # 是否运行L2模拟数据库鉴定
 RUN_L3 = "Y"          # 是否运行L3 SIRIUS结构鉴定
 RUN_L4 = "Y"          # 是否运行L4 DreaMS分子网络
 
 # ----- L1 数据库开关 -----
-L1_USE_MSDIAL = "Y"          # 使用MSDIAL通用实验库
-L1_USE_SPECTRAVERSE = "Y"    # 使用SpectraVerse通用实验库
+L1_USE_MSDIAL = "N"          # 使用MSDIAL通用实验库
+L1_USE_SPECTRAVERSE = "N"    # 使用SpectraVerse通用实验库
 
 # ----- L2 数据库开关（大类前缀匹配：开关名对应字典键前缀） -----
 L2_USE_TCM = "N"              # 覆盖 TCM_* 所有条目（如 TCM_FIORA、TCM_CFMID）
