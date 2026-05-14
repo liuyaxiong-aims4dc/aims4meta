@@ -614,6 +614,7 @@ def process_results(output_dir: str) -> tuple:
             'matched_smiles': '',
             'matched_inchikey': '',
             'matched_formula': df['molecularFormula'] if 'molecularFormula' in df.columns else '',
+            'precursor_formula': df['precursorFormula'] if 'precursorFormula' in df.columns else '',
             'cosine_score': '',
             'matched_peaks_ratio': '',
             'matched_fragments': '',
@@ -655,8 +656,6 @@ def process_results(output_dir: str) -> tuple:
         else:
             return '低置信度'
 
-    # 生成L3标准格式（统一列名，与L1/L2/L4一致）
-    # 三级策略：高置信全保留（多候选），中/低仅保留各自最佳
     df_l4 = pd.DataFrame({
         'query_name': df_output['mappingFeatureId'] if 'mappingFeatureId' in df_output.columns else (
             df_output['alignedFeatureId'] if 'alignedFeatureId' in df_output.columns else df_output.index),
@@ -664,12 +663,13 @@ def process_results(output_dir: str) -> tuple:
         'matched_smiles': df_output['smiles'],
         'matched_inchikey': df_output['InChIkey2D'] if 'InChIkey2D' in df_output.columns else '',
         'matched_formula': df_output['molecularFormula'] if 'molecularFormula' in df_output.columns else '',
+        'precursor_formula': df_output['precursorFormula'] if 'precursorFormula' in df_output.columns else '',  # SIRIUS 已融合了加合物原子的 precursor 化学式
         'cosine_score': '',  # L3无余弦相似度
         'matched_peaks_ratio': '',  # L3无碎片匹配比例
         'matched_fragments': '',  # L3无碎片详情
         'precursor_mz': df_output['ionMass'] if 'ionMass' in df_output.columns else '',
-        'library_precursor_mz': '',  # L3无库母离子
-        'precursor_ppm_diff': '',  # L3无质量偏差
+        'library_precursor_mz': '',  # 汇总脚本中由 precursor_formula 精确质量计算
+        'precursor_ppm_diff': '',  # 汇总脚本中计算
         'adduct': df_output['adduct'] if 'adduct' in df_output.columns else '',
         'matched_ontology': '',  # L3无Ontology分类
         'source_method': 'SIRIUS',

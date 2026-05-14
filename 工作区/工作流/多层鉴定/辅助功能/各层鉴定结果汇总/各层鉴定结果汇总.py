@@ -17,13 +17,31 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Dict
 
+# 单同位素精确质量（Da），用于从分子式计算理论 m/z
+_MONOISOTOPIC_MASS = {
+    'H': 1.007825, 'C': 12.000000, 'N': 14.003074, 'O': 15.994915,
+    'S': 31.972071, 'P': 30.973762, 'F': 18.998403, 'Cl': 34.968853,
+    'Br': 78.918338, 'I': 126.904468, 'Na': 22.989770, 'K': 38.963707,
+}
+
+
+def _exact_mass_from_formula(formula: str) -> float:
+    """从分子式（如 C20H28N2O14）计算单同位素精确质量"""
+    mass = 0.0
+    for m in re.finditer(r'([A-Z][a-z]?)(\d*)', str(formula).strip()):
+        elem, count = m.group(1), m.group(2)
+        count = int(count) if count else 1
+        if elem in _MONOISOTOPIC_MASS:
+            mass += _MONOISOTOPIC_MASS[elem] * count
+    return mass
+
 
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="多层鉴定结果汇总")
     parser.add_argument("--mode", required=True,
-                       choices=['L1', 'L2', 'L3', 'final', 'generate_unidentified'],
-                       help="汇总模式: L1/L2/L3(SIRIUS结构鉴定)/final/generate_unidentified")
+                       choices=['L1', 'L2', 'L3', 'final', 'final_excel', 'generate_unidentified'],
+                       help="汇总模式: L1/L2/L3(SIRIUS结构鉴定)/final/final_excel(仅生成Excel)/generate_unidentified")
     parser.add_argument("--input", default=None,
                        help="输入CSV文件路径（L1/L2/L3模式）或结果目录（final模式）")
     parser.add_argument("--mc_input", default=None, help="MC鉴定结果CSV路径（L1/L2模式，与--dreams_input搭配使用）")
@@ -84,12 +102,12 @@ def get_column_order(level: str) -> List[str]:
     elif level == 'L2':
         return base_order
     elif level == 'L3':
-        # L3 SIRIUS结构鉴定：列顺序不同（没有library_precursor_mz等）
+        # L3 SIRIUS结构鉴定：列顺序不同（无library_precursor_mz，由formula+adduct动态计算）
         return [
             'query_name',
-            'matched_name', 'formula', 'matched_inchikey',
-            'sirius_score', 'zodiac_score', 'structure_confidence',
-            'precursor_mz', 'adduct',
+            'matched_name', 'matched_formula', 'matched_inchikey',
+            'sirius_score', 'structure_confidence',
+            'precursor_mass_error', 'adduct',
             'ccs_combined',
             'isotope_similarity',
             'comprehensive_score', 'rank',
@@ -156,8 +174,6 @@ def get_column_rename_map(level: str) -> dict:
 
     # L3特有列（SIRIUS结构鉴定）
     l3_map = {
-        'formula': '预测分子式',
-        'zodiac_score': 'ZODIAC得分',
         'sirius_score': 'SIRIUS得分',
         'structure_confidence': '结构置信度',
     }
@@ -218,7 +234,8 @@ def get_columns_to_drop(level: str) -> List[str]:
         return common_drop
     elif level == 'L3':
         # L3 SIRIUS结构鉴定可能没有这些列
-        return common_drop + ['library_ccs', 'library_precursor_mz', 'precursor_ppm_diff']
+        return common_drop + ['library_ccs', 'library_precursor_mz', 'precursor_ppm_diff',
+                              'formula', 'zodiac_score', 'precursor_formula']
     elif level == 'L4':
         # L4已改为纯分子网络
         return []
@@ -237,7 +254,7 @@ def get_wrap_columns(level: str) -> str:
         逗号分隔的列名字符串
     """
     if level == 'L3':
-        return "matched_name,formula"
+        return "matched_name,matched_formula"
     else:
         return "matched_name,matched_ontology,matched_fragments"
 
@@ -404,6 +421,64 @@ def process_level_results(input_csv: str, output_csv: str, level: str,
 
     # 始终删除原始 CCS 列（信息已合并到 ccs_combined）
     df = df.drop(columns=['CCS (angstrom^2)', 'predicted_ccs', 'predicted_ccs_deviation_pct', 'CCS_error'], errors='ignore')
+
+    # L3: 若 SIRIUS 未提供 library_precursor_mz（旧版输出），从 precursor_formula 或 matched_formula+adduct 兜底计算
+    if level == 'L3' and 'matched_formula' in df.columns and 'adduct' in df.columns:
+        need_calc = False
+        if 'library_precursor_mz' not in df.columns:
+            need_calc = True
+        else:
+            # 有列但全部为空 → 需要兜底计算
+            has_nonempty = df['library_precursor_mz'].apply(
+                lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan')).any()
+            if not has_nonempty:
+                need_calc = True
+
+        if need_calc:
+            # 首选：从 precursor_formula 算精确质量（SIRIUS 已将加合物原子融入前体化学式）
+            has_precursor_formula = ('precursor_formula' in df.columns and
+                df['precursor_formula'].apply(lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan')).any())
+
+            if has_precursor_formula:
+                for idx in df.index:
+                    pf = df.loc[idx, 'precursor_formula']
+                    if pd.notna(pf) and str(pf).strip():
+                        try:
+                            # 去掉末尾的电荷符号（如 "C20H17O9-" → "C20H17O9"）
+                            library_mz = round(_exact_mass_from_formula(str(pf).strip().rstrip('+-')), 4)
+                            df.loc[idx, 'library_precursor_mz'] = library_mz
+
+                            sample_mz = df.loc[idx, 'precursor_mz']
+                            if pd.notna(sample_mz) and str(sample_mz).strip():
+                                ppm = (float(sample_mz) - library_mz) / library_mz * 1e6
+                                df.loc[idx, 'precursor_ppm_diff'] = ppm
+                        except Exception:
+                            pass
+            else:
+                # 兜底：从 matched_formula + adduct map 计算（兼容旧版无 precursor_formula 列）
+                adduct_mass_map = {
+                    '[M-H]-': -1.007825, '[M+H]+': 1.007825,
+                    '[M+Na]+': 22.989770, '[M+K]+': 38.963707,
+                    '[M+NH4]+': 18.034374, '[M+Cl]-': 34.968853,
+                    '[M+FA-H]-': 44.997654, '[M-H2O-H]-': -19.018390,
+                    '[M+HAc-H]-': 59.013305,
+                }
+                for idx in df.index:
+                    formula = df.loc[idx, 'matched_formula']
+                    adduct = df.loc[idx, 'adduct']
+                    if pd.notna(formula) and str(formula).strip() and pd.notna(adduct) and str(adduct).strip():
+                        try:
+                            exact_mass = _exact_mass_from_formula(str(formula).strip())
+                            adduct_delta = adduct_mass_map.get(str(adduct).strip().replace(' ', ''), 0)
+                            library_mz = round(exact_mass + adduct_delta, 4)
+                            df.loc[idx, 'library_precursor_mz'] = library_mz
+
+                            sample_mz = df.loc[idx, 'precursor_mz']
+                            if pd.notna(sample_mz) and str(sample_mz).strip():
+                                ppm = (float(sample_mz) - library_mz) / library_mz * 1e6
+                                df.loc[idx, 'precursor_ppm_diff'] = ppm
+                        except Exception:
+                            pass
 
     # 合并母离子列
     if 'precursor_mz' in df.columns and 'library_precursor_mz' in df.columns:
@@ -642,7 +717,7 @@ def _merge_shared_cells(worksheet, df: pd.DataFrame, wrap_col_indices: set):
     candidate_cols_pattern = re.compile(
         r'^(matched_|cosine_|余弦|匹配碎片|鉴定碎片|鉴定SMILES|鉴定InChIKey|鉴定分子式|'
         r'鉴定化合物|分类|鉴定方法|来源数据库|综合得分|排名|simulated_library|'
-        r'source_tool|预测分子式|SIRIUS|ZODIAC|结构置信度|isomer_id|'
+        r'source_tool|SIRIUS|结构置信度|isomer_id|'
         r'source_(method|database)|isotope_similarity|同位素相似度|'
         r'library_precursor|鉴定母离子|precursor_mass_error|母离子.*偏差|'
         r'identification_level|鉴定层级|rank|comprehensive_score|'
@@ -706,7 +781,7 @@ def collapse_shared_query_columns(df: pd.DataFrame, query_col: str = 'query_name
     candidate_cols_pattern = re.compile(
         r'^(matched_|cosine_|余弦|匹配碎片|鉴定碎片|鉴定SMILES|鉴定InChIKey|鉴定分子式|'
         r'鉴定化合物|分类|鉴定方法|来源数据库|综合得分|排名|simulated_library|'
-        r'source_tool|预测分子式|SIRIUS|ZODIAC|结构置信度|isomer_id|'
+        r'source_tool|SIRIUS|结构置信度|isomer_id|'
         r'source_(method|database)|isotope_similarity|同位素相似度|'
         r'library_precursor|鉴定母离子|precursor_mass_error|母离子.*偏差|'
         r'identification_level|鉴定层级|rank|comprehensive_score)'
@@ -803,14 +878,12 @@ def process_final_results(output_dir: str, l1_csv: str, l2_csv: str, l3_csv: str
                     }
                     df = df.rename(columns=l3_rename)
 
-                    # 旧版L3的matched_formula是分子式，复制到formula列
-                    if 'matched_formula' in df.columns:
-                        df['formula'] = df['matched_formula']
+                    # 旧版L3的matched_formula是分子式（不再复制到formula列，终稿由matched_formula直接展示）
+                    pass
                 else:
                     # 新版L3格式：precursor_mz, adduct已经是标准列名
-                    # matched_formula是分子式，复制到formula列
-                    if 'matched_formula' in df.columns:
-                        df['formula'] = df['matched_formula']
+                    # matched_formula是分子式（不再复制到formula列）
+                    pass
 
                 # 2. 添加必要列
                 if 'source_method' not in df.columns:
@@ -828,7 +901,8 @@ def process_final_results(output_dir: str, l1_csv: str, l2_csv: str, l3_csv: str
                 # csi_score, confidence_exact, confidence_approx 已经在structure_confidence中体现
 
                 # 4. 删除冗余列
-                cols_to_drop = ['csi_score', 'confidence_exact', 'confidence_approx', 'identification_source']
+                cols_to_drop = ['csi_score', 'confidence_exact', 'confidence_approx', 'identification_source',
+                               'formula', 'zodiac_score']
                 df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
 
                 # 5. L3无类似物验证标记（原L4a逻辑已移除）
@@ -1157,6 +1231,24 @@ def main():
                                        mc_input=args.mc_input,
                                        dreams_input=args.dreams_input,
                                        additional_identified_csv=getattr(args, 'additional_identified_csv', None))
+    elif args.mode == 'final_excel':
+        # 仅从已有 CSV 生成格式化 Excel（辅助功能已执行完毕后的最终输出）
+        if not args.input or not os.path.exists(args.input):
+            print(f"[ERROR] final_excel模式需要 --input 为已存在的CSV文件: {args.input}")
+            return 1
+        df = pd.read_csv(args.input)
+        # 合并共享列
+        df = collapse_shared_query_columns(df)
+        # 中文列名
+        rename_map = get_column_rename_map('final')
+        rename_map.update(get_column_rename_map('L2'))
+        df_cn = df.rename(columns=rename_map)
+        wrap_cols = ','.join([rename_map.get(c,c) for c in "matched_name,matched_ontology,matched_fragments".split(',') if c])
+        xlsx = get_excel_filename_from_msp(args.sample_msp, args.input, "final", ion_mode=args.ion_mode)
+        sheet = get_sheet_name_from_msp(args.sample_msp)
+        format_excel_output(df_cn, xlsx, wrap_columns=wrap_cols, sheet_name=sheet)
+        print(f"Excel已生成: {xlsx}")
+        return 0
     elif args.mode == 'final':
         success = process_final_results(
             args.input,  # 作为output_dir
