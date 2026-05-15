@@ -792,15 +792,22 @@ def main():
         return False
 
     # [3] 运行SIRIUS分析（直接使用MSP）
-    print("\n[3/5] 运行SIRIUS分析...")
-    if not run_sirius_analysis(args.sirius_bin, processed_msp, str(output_dir),
-                               args.instrument, args.databases, args.ion_mode):
-        print("错误: SIRIUS分析失败")
-        write_summary(str(output_dir), args, n_compounds, 0, False)
-        return False
+    # 若项目已存在（续传），跳过全部 SIRIUS 计算，零增长
+    # 注意：sirius_results/ 会被 clean 清理，不能通过它判断；仅靠 .sirius 文件大小
+    sirius_project = os.path.join(str(output_dir), 'sirius_project.sirius')
+    if os.path.exists(sirius_project) and os.path.getsize(sirius_project) > 10 * 1024 * 1024:
+        size_mb = os.path.getsize(sirius_project) / (1024 * 1024)
+        print(f"\n[3/5] SIRIUS分析（续传 - 项目已存在 {size_mb:.1f} MB，跳过全部计算）...")
+        print(f"  [跳过] Formula/Fingerprint/CANOPUS/Structure 均已存在，直接复用")
+    else:
+        print("\n[3/5] 运行SIRIUS分析...")
+        if not run_sirius_analysis(args.sirius_bin, processed_msp, str(output_dir),
+                                   args.instrument, args.databases, args.ion_mode):
+            print("错误: SIRIUS分析失败")
+            write_summary(str(output_dir), args, n_compounds, 0, False)
+            return False
 
     # [4] 导出结果（失败时重试structure步骤）
-    sirius_project = os.path.join(str(output_dir), 'sirius_project.sirius')
     max_export_retries = 2
     export_ok = False
 
