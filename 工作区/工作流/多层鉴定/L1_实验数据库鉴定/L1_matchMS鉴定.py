@@ -532,10 +532,13 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 根据输出目录判断层级
+    # 根据输出目录最后一级判断层级，避免父目录名包含 L2/L3 时误判
     level = "L1"
-    if args.output_dir and "L2" in args.output_dir:
+    output_dir_name = os.path.basename(os.path.normpath(args.output_dir or ""))
+    if output_dir_name.startswith("L2"):
         level = "L2"
+    elif output_dir_name.startswith("L3"):
+        level = "L3"
 
     # 根据层级设置输出文件名
     output_csv = args.output_csv or os.path.join(args.output_dir, f"{level}_matchMS_results.csv")
@@ -546,8 +549,6 @@ def main():
         isotope_data = load_isotope_data(args.sample_csv)
     elif args.sample_csv:
         print(f"[WARN] sample_csv 不存在: {args.sample_csv}")
-    elif args.output_dir and "L3" in args.output_dir:
-        level = "L3"
 
     print("=" * 70)
     print(f"{level} MatchMS 鉴定")
