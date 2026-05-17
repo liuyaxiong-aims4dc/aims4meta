@@ -6377,5 +6377,6 @@
   "O=c1cc(-c2ccc(O)cc2)oc2cc(O)c([C@@H]3OC[C@@H](O)[C@@H](O)[C@H]3O)c(O)c12_class_sirius": "Benzene and substituted derivatives",
   "O=c1cc(-c2ccc(O)cc2)oc2cc(O)c([C@@H]3OC[C@@H](O)[C@H](O)C3O)c(O)c12_class_sirius": "Benzene and substituted derivatives",
   "C1C(C(C(C(O1)OC2=C(OC3=CC(=CC(=C3C2=O)O)O)C4=CC=CC=C4)O)O)O_class_sirius": "Benzene and substituted derivatives",
-  "CN1C=NN=C1SC2=CC=CC=C2NS(=O)(=O)C3=C(C(=CC=C3)Cl)O_class_sirius": "Aryl halides"
+  "CN1C=NN=C1SC2=CC=CC=C2NS(=O)(=O)C3=C(C(=CC=C3)Cl)O_class_sirius": "Aryl halides",
+  "CC1=CSC(=C1S(=O)(=O)NC2=CC(=C(C=C2)O)Cl)C(=O)O_class_sirius": "Allyl-type 1,3-dipolar organic compounds"
 }

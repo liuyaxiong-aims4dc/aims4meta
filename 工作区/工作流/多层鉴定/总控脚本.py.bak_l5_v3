@@ -112,12 +112,6 @@ L3_MIN_INTENSITY = 500
 
 L4_SIM_THRESHOLD = 0.8
 
-# L5 从头鉴定
-L5_NUM_CANDIDATES = 5
-L5_SIMILARITY_THRESHOLD = 0.7
-L5_ENCODER_PATH = "/stor3/AIMS4Meta/源代码/MSFlow-main/checkpoints/Encoder/encoder_msg_cddd.pt"
-L5_DECODER_PATH = "/stor3/AIMS4Meta/源代码/MSFlow-main/checkpoints/Decoder/MSFlow_cddds.ckpt"
-
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                    七、结果汇总参数                                      ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -474,35 +468,12 @@ def _l3_sirius(args, l2u, l1ok, l1u, qi):
              "--output",os.path.join(out,"L3_unidentified.msp"),
              "--output_msp",os.path.join(out,"L3_unidentified.msp")], "dreams")
 
-
-def _l4_denovo(args, l4u):
-    out = os.path.join(args.output_dir, "L4_results"); os.makedirs(out, exist_ok=True)
-    l5i = args.sample
-    if l4u and os.path.exists(l4u) and os.path.getsize(l4u) > 0:
-        l5i = l4u
-    _run(SP("L4_从头鉴定/L4_从头鉴定.py"), [
-        "--input_msp", l5i,
-        "--output_dir", out,
-        "--ion_mode", args.ion_mode,
-        "--num_candidates", str(L5_NUM_CANDIDATES),
-        "--encoder_path", L5_ENCODER_PATH,
-        "--decoder_path", L5_DECODER_PATH,
-    ], "msflow")
 def _l4_net(args, emb):
     """步骤5: L4 DreaMS 分子网络 —— 样品间 embedding 余弦相似度建网"""
-    _rune(SP("辅助功能/分子网络/分子网络/L4_DreaMS分子网络.py"), build_l4_analog_env(args, emb), "dreams")
+    _rune(SP("L4_DreaMS分子网络/L4_DreaMS分子网络.py"), build_l4_analog_env(args, emb), "dreams")
 
 def _final(args):
     """步骤6: 最终汇总 —— 合并L1+L2+L3 → CSV关联 → 同位素 → Ontology → CCS → 翻译 → Excel"""
-    emb_path = os.path.join(args.output_dir, "L1_results", "embeddings.npz")
-    if os.path.exists(emb_path):
-        logger.info("[辅助] 构建分子网络...")
-        _rune(SP("辅助功能/分子网络/L4_DreaMS分子网络.py"),
-            {"L4_OUTPUT_DIR": os.path.join(args.output_dir, "L4_results"),
-             "L4_SAMPLE_EMB": emb_path,
-             "L4_SAMPLE_MSP": args.sample,
-             "L4_SIM_THRESHOLD": str(L4_SIM_THRESHOLD)}, "dreams")
-
     fc = os.path.join(args.output_dir, "多层鉴定总结果.csv")
     sm = SP("辅助功能/各层鉴定结果汇总/各层鉴定结果汇总.py")
     try:
@@ -577,10 +548,8 @@ def main():
         step += 1; _pg(step, total, "L3 SIRIUS", not ss)
         _l3_sirius(args, l2.get("u", args.sample), l1.get("ok", False), l1.get("u", args.sample), qi)
     if not args.skip_l4:
-        step += 1; _pg(step, total, "L4 从头鉴定", not ss)
-        l5u = os.path.join(args.output_dir, "L4_results", "L4_unidentified.msp")
-        if not os.path.exists(l5u): l5u = args.sample
-        _l4_denovo(args, l5u)
+        step += 1; _pg(step, total, "L4 分子网络", not ss)
+        _l4_net(args, emb)
     if not args.skip_summary:
         step += 1; _pg(step, total, "最终汇总", not ss)
         _final(args)

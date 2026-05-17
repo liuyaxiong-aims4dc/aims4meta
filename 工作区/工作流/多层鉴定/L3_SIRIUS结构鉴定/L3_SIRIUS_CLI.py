@@ -806,6 +806,7 @@ def main():
             print("错误: SIRIUS分析失败")
             write_summary(str(output_dir), args, n_compounds, 0, False)
             return False
+            return False
 
     # [4] 导出结果（失败时重试structure步骤）
     max_export_retries = 2
