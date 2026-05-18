@@ -36,7 +36,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 # SIRIUS 路径
-SIRIUS_PATH = "/stor1/AIMS4Meta/code/SIRIUS/sirius-6.3.3-linux-x64/sirius/bin/sirius"
+SIRIUS_PATH = '/stor3/AIMS4Meta/源代码/SIRIUS/sirius-6.3.5-linux-x64/sirius/bin/sirius'
 
 # SIRIUS 登录凭证
 SIRIUS_USERNAME = "fanhl@whut.edu.cn"

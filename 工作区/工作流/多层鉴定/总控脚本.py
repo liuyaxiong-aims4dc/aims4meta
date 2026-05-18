@@ -14,12 +14,11 @@ from pathlib import Path
 RUN_L1 = "Y"
 RUN_L2 = "Y"
 RUN_L3 = "Y"
-RUN_L4 = "Y"
 
 L1_USE_MSDIAL = "Y"
 L1_USE_SPECTRAVERSE = "Y"
 
-L2_USE_TCM = "N"
+L2_USE_TCM = "Y"
 L2_USE_DRUG = "N"
 L2_USE_LIPID = "N"
 L2_USE_PFAS = "N"
@@ -107,10 +106,8 @@ L3_MAX_MZ = 1500
 L3_MIN_INTENSITY = 500
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║                    六、L4 DreaMS 分子网络参数                             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
-L4_SIM_THRESHOLD = 0.8
 
 # L5 从头鉴定
 L5_NUM_CANDIDATES = 5
@@ -126,7 +123,6 @@ SUMMARY_OUTPUT_FORMAT = "xlsx"
 SUMMARY_INCLUDE_L1 = True
 SUMMARY_INCLUDE_L2 = True
 SUMMARY_INCLUDE_L3 = True
-SUMMARY_INCLUDE_L4 = False
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                 八、数据库开关与辅助函数                                  ║
@@ -263,11 +259,6 @@ def build_l2_dreams_env_full(args, l2_in, emb, dbs, out):
             'L1_COSINE_THRESHOLD': str(L2_COSINE_THRESHOLD),
             'L1_TOP_K': str(L2_TOP_K), 'L1_OUTPUT_DIR': out}
 
-def build_l4_analog_env(args, emb):
-    """L4 DreaMS 分子网络 —— 环境变量（样品间 embedding 互连）"""
-    return {'L4_OUTPUT_DIR': os.path.join(args.output_dir, "L4_results"),
-            'L4_SAMPLE_EMB': emb, 'L4_SAMPLE_MSP': args.sample,
-            'L4_SIM_THRESHOLD': str(L4_SIM_THRESHOLD)}
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                 十、调度引擎（纯调度，不处理数据）                         ║
@@ -304,14 +295,13 @@ def parse_arguments():
     p.add_argument("--ion_mode", default=ION_MODE, choices=["POS","NEG"])
     p.add_argument("--output_dir", default=OUTPUT_BASE_DIR)
     p.add_argument("--databases", nargs="*", default=[])
-    for x in ["skip_l1_vec","skip_l1","skip_l2","skip_l3","skip_l4"]: p.add_argument(f"--{x}", action="store_true")
-    for x in ["only_l1_vec","only_l1","only_l2","only_l3","only_l4"]: p.add_argument(f"--{x}", action="store_true")
+    for x in ["skip_l1_vec","skip_l1","skip_l2","skip_l3"]: p.add_argument(f"--{x}", action="store_true")
+    for x in ["only_l1_vec","only_l1","only_l2","only_l3"]: p.add_argument(f"--{x}", action="store_true")
     a = p.parse_args(); a.ion_mode = a.ion_mode.upper()
-    if a.only_l1_vec: a.skip_l1 = a.skip_l2 = a.skip_l3 = a.skip_l4 = True
-    elif a.only_l1: a.skip_l2 = a.skip_l3 = a.skip_l4 = True
-    elif a.only_l2: a.skip_l1_vec = a.skip_l1 = a.skip_l3 = a.skip_l4 = True
-    elif a.only_l3: a.skip_l1_vec = a.skip_l1 = a.skip_l2 = a.skip_l4 = True
-    elif a.only_l4: a.skip_l1_vec = a.skip_l1 = a.skip_l2 = a.skip_l3 = True
+    if a.only_l1_vec: a.skip_l1 = a.skip_l2 = a.skip_l3
+    elif a.only_l1: a.skip_l2 = a.skip_l3
+    elif a.only_l2: a.skip_l1_vec = a.skip_l1 = a.skip_l3
+    elif a.only_l3: a.skip_l1_vec = a.skip_l1 = a.skip_l2
     a.skip_summary = a.only_l1_vec; return a
 
 # ---- 工具函数 ----
@@ -361,7 +351,7 @@ def _gen_umsp(sc, rcsv, msp, out):
 def _clean(args):
     """清理旧结果：删除各层 CSV/缓存，保留 embedding.npz 和 sirius_project 续传文件"""
     for lv in {l for l,f in [('L1',args.skip_l1),('L2',args.skip_l2),
-               ('L3',args.skip_l3),('L4',args.skip_l4)] if not f}:
+               ('L3',args.skip_l3)] if not f}:
         d = os.path.join(args.output_dir, f"{lv}_results")
         if not os.path.isdir(d): continue
         for it in os.listdir(d):
@@ -475,34 +465,9 @@ def _l3_sirius(args, l2u, l1ok, l1u, qi):
              "--output_msp",os.path.join(out,"L3_unidentified.msp")], "dreams")
 
 
-def _l4_denovo(args, l4u):
-    out = os.path.join(args.output_dir, "L4_results"); os.makedirs(out, exist_ok=True)
-    l5i = args.sample
-    if l4u and os.path.exists(l4u) and os.path.getsize(l4u) > 0:
-        l5i = l4u
-    _run(SP("L4_从头鉴定/L4_从头鉴定.py"), [
-        "--input_msp", l5i,
-        "--output_dir", out,
-        "--ion_mode", args.ion_mode,
-        "--num_candidates", str(L5_NUM_CANDIDATES),
-        "--encoder_path", L5_ENCODER_PATH,
-        "--decoder_path", L5_DECODER_PATH,
-    ], "msflow")
-def _l4_net(args, emb):
-    """步骤5: L4 DreaMS 分子网络 —— 样品间 embedding 余弦相似度建网"""
-    _rune(SP("辅助功能/分子网络/分子网络/L4_DreaMS分子网络.py"), build_l4_analog_env(args, emb), "dreams")
 
 def _final(args):
     """步骤6: 最终汇总 —— 合并L1+L2+L3 → CSV关联 → 同位素 → Ontology → CCS → 翻译 → Excel"""
-    emb_path = os.path.join(args.output_dir, "L1_results", "embeddings.npz")
-    if os.path.exists(emb_path):
-        logger.info("[辅助] 构建分子网络...")
-        _rune(SP("辅助功能/分子网络/L4_DreaMS分子网络.py"),
-            {"L4_OUTPUT_DIR": os.path.join(args.output_dir, "L4_results"),
-             "L4_SAMPLE_EMB": emb_path,
-             "L4_SAMPLE_MSP": args.sample,
-             "L4_SIM_THRESHOLD": str(L4_SIM_THRESHOLD)}, "dreams")
-
     fc = os.path.join(args.output_dir, "多层鉴定总结果.csv")
     sm = SP("辅助功能/各层鉴定结果汇总/各层鉴定结果汇总.py")
     try:
@@ -510,11 +475,14 @@ def _final(args):
             "--output",fc,"--l1_results",os.path.join(args.output_dir,"L1_results","L1_results.csv"),
             "--l2_results",os.path.join(args.output_dir,"L2_results","L2_results.csv"),
             "--l3_results",os.path.join(args.output_dir,"L3_results","L3_identified.csv"),
-            "--l4_results",os.path.join(args.output_dir,"L4_results","L4_network_nodes.csv"),
             "--sample_msp",args.sample,"--ion_mode",args.ion_mode], capture_output=True, text=True)
         if r.returncode != 0: logger.warning(f"汇总失败({r.returncode})")
     except Exception as e: logger.warning(f"汇总异常: {e}")
     if not os.path.exists(fc): return
+
+    logger.info("[汇总] 分子网络节点注释...")
+    _run(SP("辅助功能/分子网络/annotate_network_nodes.py"), ["--input_dir",args.output_dir], "dreams")
+
     logger.info("[汇总] 辅助功能: CSV关联→同位素→Ontology→CCS→翻译")
     qi = getattr(args,'qi_csv',None) or FC(args.sample)
     if qi and os.path.exists(qi):
@@ -542,9 +510,8 @@ def main():
     if not args.skip_l1: args.skip_l1 = not _on(RUN_L1)
     if not args.skip_l2: args.skip_l2 = not _on(RUN_L2)
     if not args.skip_l3: args.skip_l3 = not _on(RUN_L3)
-    if not args.skip_l4: args.skip_l4 = not _on(RUN_L4)
     if not args.sample: logger.error("[ERROR] 请提供 --sample"); return
-    ss = args.only_l1_vec or args.only_l1 or args.only_l2 or args.only_l3 or args.only_l4
+    ss = args.only_l1_vec or args.only_l1 or args.only_l2 or args.only_l3
     if not args.output_dir:
         d = os.path.dirname(args.sample); n = os.path.splitext(os.path.basename(args.sample))[0]
         args.output_dir = os.path.join(d, f"{n}_多层鉴定结果")
@@ -555,7 +522,7 @@ def main():
     l2n = list(L2_SIMULATED_DATABASES.keys()) if L2_SIMULATED_DATABASES else ["无"]
     logger.info(f"L1: {', '.join(l1n)} | L2: {', '.join(l2n)}")
     ls = [lv for lv,f in [("L1",args.skip_l1),("L2",args.skip_l2),
-          ("L3",args.skip_l3),("L4",args.skip_l4)] if not f]
+          ("L3",args.skip_l3)] if not f]
     logger.info(f"运行: {'→'.join(ls) if ls else '无'} → 汇总")
     logger.info(f"输出: {args.output_dir}"); logger.info("="*60)
     qi = FC(args.sample) if args.sample.lower().endswith('.msp') else None
@@ -576,11 +543,6 @@ def main():
     if not args.skip_l3:
         step += 1; _pg(step, total, "L3 SIRIUS", not ss)
         _l3_sirius(args, l2.get("u", args.sample), l1.get("ok", False), l1.get("u", args.sample), qi)
-    if not args.skip_l4:
-        step += 1; _pg(step, total, "L4 从头鉴定", not ss)
-        l5u = os.path.join(args.output_dir, "L4_results", "L4_unidentified.msp")
-        if not os.path.exists(l5u): l5u = args.sample
-        _l4_denovo(args, l5u)
     if not args.skip_summary:
         step += 1; _pg(step, total, "最终汇总", not ss)
         _final(args)

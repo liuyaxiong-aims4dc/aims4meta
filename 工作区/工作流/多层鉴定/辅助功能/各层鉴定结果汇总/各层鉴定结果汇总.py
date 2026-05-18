@@ -1243,6 +1243,8 @@ def main():
         rename_map = get_column_rename_map('final')
         rename_map.update(get_column_rename_map('L2'))
         df_cn = df.rename(columns=rename_map)
+        allowed = set(rename_map.values()) | {"鉴定层级", "identification_level"}
+        df_cn = df_cn[[c for c in df_cn.columns if c in allowed]]
         wrap_cols = ','.join([rename_map.get(c,c) for c in "matched_name,matched_ontology,matched_fragments".split(',') if c])
         xlsx = get_excel_filename_from_msp(args.sample_msp, args.input, "final", ion_mode=args.ion_mode)
         sheet = get_sheet_name_from_msp(args.sample_msp)
