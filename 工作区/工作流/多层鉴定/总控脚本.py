@@ -23,14 +23,16 @@ L2_USE_DRUG = "N"
 L2_USE_LIPID = "N"
 L2_USE_PFAS = "N"
 
+L3_USE_MSNOVOLIST = "Y"
+L3_MSNOVOLIST_MAX_MZ = 800.0
 L3_ONLINE_DATABASES = ["BIO"]
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                       二、基础配置                                      ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
-SAMPLE = "/stor1/微力临时文件共享/20260508kangfengshi/kangfengshi-NEG.msp"
-ION_MODE = "NEG"
+SAMPLE = "/stor1/微力临时文件共享/20260508kangfengshi/kangfengshi-POS.msp"
+ION_MODE = "POS"
 OUTPUT_BASE_DIR = ""
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
@@ -435,7 +437,7 @@ def _l3_sirius(args, l2u, l1ok, l1u, qi):
     ck = SP("辅助功能/L3参数续传校验/L3参数续传校验.py")
     ca = ["--mode","check","--output_dir",out,"--sample_msp",l3i,
           "--ion_mode",args.ion_mode,"--instrument",L3_SIRIUS_INSTRUMENT,
-          "--mz_threshold",str(L3_MAX_MZ),"--min_peaks",str(L3_MIN_PEAKS),"--databases"]+dbs
+          "--mz_threshold",str(L3_MAX_MZ),"--min_peaks",str(L3_MIN_PEAKS),"--use_msnovolist",str(L3_USE_MSNOVOLIST),"--msnovolist_max_mz",str(L3_MSNOVOLIST_MAX_MZ),"--databases"]+dbs
     if qi and L3_MIN_INTENSITY>0: ca += ["--sample_csv",qi,"--min_intensity",str(L3_MIN_INTENSITY)]
     _run(ck, ca, "dreams")
     cmd = [sys.executable, SP("L3_SIRIUS结构鉴定/L3_SIRIUS_CLI.py"),
@@ -453,7 +455,7 @@ def _l3_sirius(args, l2u, l1ok, l1u, qi):
             logger.info("[L3] 成功")
             sa = ["--mode","save","--output_dir",out,"--sample_msp",l3i,
                   "--ion_mode",args.ion_mode,"--instrument",L3_SIRIUS_INSTRUMENT,
-                  "--mz_threshold",str(L3_MAX_MZ),"--min_peaks",str(L3_MIN_PEAKS),"--databases"]+dbs
+                  "--mz_threshold",str(L3_MAX_MZ),"--min_peaks",str(L3_MIN_PEAKS),"--use_msnovolist",str(L3_USE_MSNOVOLIST),"--msnovolist_max_mz",str(L3_MSNOVOLIST_MAX_MZ),"--databases"]+dbs
             if qi and L3_MIN_INTENSITY>0: sa += ["--sample_csv",qi,"--min_intensity",str(L3_MIN_INTENSITY)]
             _run(ck, sa, "dreams")
     except Exception as e: logger.error(f"[L3] 异常: {e}")

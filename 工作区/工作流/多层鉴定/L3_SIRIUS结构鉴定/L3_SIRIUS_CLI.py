@@ -321,7 +321,7 @@ def ensure_local_dbs_registered(sirius_bin: str, databases: list) -> None:
 
 
 def run_sirius_analysis(sirius_bin: str, input_file: str, output_dir: str,
-                       instrument: str, databases: list, ion_mode: str = 'POS') -> bool:
+                       instrument: str, databases: list, ion_mode: str = 'POS', use_msnovolist: str = 'N') -> bool:
     """运行SIRIUS分析（分步执行：formula → fingerprint → canopus → structure）"""
     profile = 'orbitrap' if instrument == 'orbitrap' else 'qtof'
     db_str = ','.join(databases)
@@ -735,6 +735,8 @@ def main():
                        help='配套 Progenesis QI CSV（用于 Maximum Abundance 信号过滤，空则不过滤）')
     parser.add_argument('--min_intensity', type=float, default=0,
                        help='信号强度阈值，化合物 Maximum Abundance 低于该值则跳过（0 表示停用，默认 0）')
+    parser.add_argument('--use_msnovolist', default='N')
+    parser.add_argument('--msnovolist_max_mz', type=float, default=800.0)
     parser.add_argument('--databases', nargs='+', default=DEFAULT_DATABASES,
                        help=f'结构数据库列表，支持在线库(BIO等)和本地库(tcmbank_herb等) (默认: {" ".join(DEFAULT_DATABASES)})')
     parser.add_argument('--sirius_bin', default=DEFAULT_SIRIUS_BIN, help='SIRIUS路径')
@@ -802,7 +804,7 @@ def main():
     else:
         print("\n[3/5] 运行SIRIUS分析...")
         if not run_sirius_analysis(args.sirius_bin, processed_msp, str(output_dir),
-                                   args.instrument, args.databases, args.ion_mode):
+                                   args.instrument, args.databases, args.ion_mode, args.use_msnovolist):
             print("错误: SIRIUS分析失败")
             write_summary(str(output_dir), args, n_compounds, 0, False)
             return False
