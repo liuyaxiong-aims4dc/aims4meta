@@ -416,7 +416,17 @@ def run_sirius_analysis(sirius_bin: str, input_file: str, output_dir: str,
         '--db', db_str
     ]
 
-    return _run_sirius_step(cmd4, "Structure")
+    if not _run_sirius_step(cmd4, "Structure"):
+        return False
+
+    if use_msnovolist == "Y":
+        print("\n  [MSNovolist] Running de novo structure prediction...")
+        import multiprocessing
+        cmd_novel = [sirius_bin, "--cores", str(multiprocessing.cpu_count()), "-i", sirius_project, "-o", sirius_project, "denovo-structures", "-c", "10"]
+        if not _run_sirius_step(cmd_novel, "MSNovolist"):
+            print("  [MSNovolist] Failed, continuing")
+
+    return True
 
 
 def _run_sirius_step(cmd: list, step_name: str) -> bool:

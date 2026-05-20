@@ -111,8 +111,11 @@ def load_models(dev):
         form_embedder='pos-cos', output_size=512, hidden_size=512, spectra_dropout=0.0,
         top_layers=1, refine_layers=4, magma_modulo=2048)
     enc.load_state_dict(chk['model_state_dict']); enc.eval(); enc.to(dev)
-    for n, c in enc.named_children():
-        if isinstance(c, torch.nn.Sigmoid): setattr(enc, n, torch.nn.Tanh())
+    def _replace_sig(m):
+        for name, child in m.named_children():
+            if isinstance(child, torch.nn.Sigmoid): setattr(m, name, torch.nn.Tanh())
+            else: _replace_sig(child)
+    _replace_sig(enc)
     cfm = CondFlowMolBERTLitModule.load_from_checkpoint('checkpoints/Decoder/MSFlow_cddds.ckpt')
     dec = cfm.model; dec.eval(); dec.to(dev)
     return enc, dec
@@ -147,7 +150,7 @@ if __name__ == '__main__':
             cddd = encode(spec['precursor_mz'], spec['peaks'], fm, a.subform_dir, enc, dec, a.device, spec['name'])
             cond = cddd.unsqueeze(0).expand(a.num_candidates, -1)
             samps = cond_generate_mols(dec, cond=cond, source_distribution='uniform',
-                num_samples=a.num_candidates, steps=32, guidance_scale=1.5, temperature=1, device=a.device)
+                num_samples=a.num_candidates, steps=128, guidance_scale=1.5, temperature=1, device=a.device)
             _, smi = decode_tokens_to_smiles(samps, ID2TOK=ID2TOK, TOK2ID=TOK2ID, PAD=PAD)
             smi = [canonicalize(s) for s in smi if s]
             smi = [s for s in smi if s is not None]

@@ -1,0 +1,10 @@
+{
+  "dataset": "spectraverse_pos",
+  "n_spectra": 20,
+  "n_candidates": 5,
+  "top1_exact_accuracy": 0.0,
+  "top5_exact_accuracy": 0.0,
+  "avg_best_tanimoto": 0.2854,
+  "total_time_s": 174.9,
+  "avg_time_per_spectrum_s": 8.74
+}
